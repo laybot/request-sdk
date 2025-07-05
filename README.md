@@ -1,93 +1,227 @@
-# LayBot项目库
+# Laybot 开源项目库
 
+# LayBot 母仓 + 子目录多 SDK 的完整发布 & 迭代手册
+（以 laybot-source ➜ laybot-php-sdk ➜ GitHub/Packagist 为示例， 其它语言 Node/Python 等同）
 
+────────────────────────────────────  
+目录
+1. 总体结构
+2. 首次创建子目录并首发到 GitHub / Packagist
+3. 日常开发 & 发新版本
+4. Packagist 自动同步设置
+5. composer install / vendor / .gitignore 的正确姿势
+6. 多语言 SDK 的横向复用模板
+7. 常用脚本与快捷命令
 
-## Getting started
-
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
-
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
-
-## Add your files
-
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/ee/gitlab-basics/add-file.html#add-a-file-using-the-command-line) or push an existing Git repository with the following command:
+================================================================
+1. 母仓目录与远端约定
+----------------------------------------------------------------  
 
 ```
-cd existing_repo
-git remote add origin http://git.laybot.cn/laybot/laybotSource.git
-git branch -M main
-git push -uf origin main
+laybot-source/              # 私有 GitLab 母仓（origin）
+│
+├─ laybot-php-sdk/          # ① PHP SDK（子目录）
+│   ├─ composer.json        # name = "laybot/ai-sdk"
+│   └─ src/…
+│
+├─ laybot-python-sdk/       # ② Python SDK（同理）
+└─ ...
 ```
 
-## Integrate with your tools
+远端命名
 
-- [ ] [Set up project integrations](http://git.laybot.cn/laybot/laybotSource/-/settings/integrations)
+```
+origin            http://git.laybot.cn/laybot/laybot-source.git   # 私有
+php-sdk (推)      git@github.com:laybot/ai-sdk-php.git            # 公共
+py-sdk  (推)      git@github.com:laybot/ai-sdk-python.git         # 公共
+```
 
-## Collaborate with your team
+SSH：  
+– 单账号 → 用默认 `git@github.com:` + `id_ed25519`  
+– 多账号 → 多把私钥 + `Host github.com-personal` / `github.com-work` 区分
 
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Set auto-merge](https://docs.gitlab.com/ee/user/project/merge_requests/merge_when_pipeline_succeeds.html)
+================================================================
+2. 子目录首次上线（以 PHP 为例）
+----------------------------------------------------------------  
 
-## Test and Deploy
+① 在 laybot-php-sdk 里 `composer init` 并完善 `composer.json`
 
-Use the built-in continuous integration in GitLab.
+```json
+{
+  "name": "laybot/ai-sdk",
+  "description": "LayBot official PHP SDK",
+  "type": "library",
+  "license": "MIT",
+  "autoload": { "psr-4": { "LayBot\\": "src/" } },
+  "require": {
+    "php": ">=8.0",
+    "guzzlehttp/guzzle": "^7.9"
+  }
+}
+```
 
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/index.html)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
+② 不要提交 vendor / composer.lock  
+在 laybot-source 根或子目录写 `.gitignore`：
 
-***
+```
+/vendor
+composer.lock
+```
 
-# Editing this README
+③ 母仓提交
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+```bash
+git add laybot-php-sdk
+git commit -m "feat: add php sdk"
+```
 
-## Suggestions for a good README
+④ 拆子树并推 GitHub
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+```bash
+git subtree split --prefix=laybot-php-sdk -b php-split
+git push -u php-sdk php-split:main         # 覆盖空仓
+git tag v0.1.0 php-split
+git push php-sdk v0.1.0
+```
 
-## Name
-Choose a self-explaining name for your project.
+⑤ Packagist 首次提交  
+复制 Webhook URL → GitHub Settings → Webhooks → push event
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+至此：  
+`composer require laybot/ai-sdk:^0.1` 能装到 `vendor/laybot/ai-sdk/src`.
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+================================================================
+3. 日常迭代 & 版本升级
+----------------------------------------------------------------  
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+```bash
+# 1) 修改 & 测试
+cd laybot-source
+(code…)
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+# 2) 安装依赖（仅本机 / CI）
+cd laybot-php-sdk
+composer install        # 会生成 vendor/ 但未提交
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+# 3) 回母仓根提交
+cd ..
+git add laybot-php-sdk
+git commit -m "fix: xxx"
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+# 4) 拆分 & 推送
+git subtree split --prefix=laybot-php-sdk -b php-split
+git push -f php-sdk php-split:main
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+# 5) 打新版本
+git tag v0.2.0 php-split
+git push php-sdk v0.2.0      # Packagist Webhook 自动更新
+```
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+守则  
+• 永远 **新版本号**，不要 `-f` 覆盖已发 tag  
+• 母仓 main 不推 GitHub；只推 php-split → main  
+• 出错可在母仓重新 split，再 `git push -f …`
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+================================================================
+4. Packagist 自动同步一次到位
+----------------------------------------------------------------  
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+1. Packagist 包页面 → Settings → 复制 “GitHub Hook URL”
+2. GitHub 仓库 Settings → Webhooks → Add  
+   – Payload URL：粘贴  
+   – Content type：application/json  
+   – 只勾 push
+3. 保存后 Ping = ✓  
+   以后 `git push` + `git push tag` ≤30s 内版本就出现。
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+================================================================
+5. 正确使用 composer install & IDE 提示
+----------------------------------------------------------------  
 
-## License
-For open source projects, say how it is licensed.
+场景：在 laybot-source 项目里希望 IDE 对 PHP SDK 语法高亮、自动补全，但又 **不想把 vendor 或 lock 提交**。
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+做法
+
+```
+cd laybot-php-sdk
+composer install          # 本地生成 vendor
+```
+
+• `.gitignore` 已忽略 vendor/ & composer.lock → 不会进 Git 版本库  
+• IDE (PhpStorm/VSC) 可解析依赖，提示消失  
+• CI 可以同样先 `composer install` 再跑单测  
+• 打包发布时 Packagist 只看源代码，不受 vendor 影响
+
+================================================================
+6. 复制流程到其它语言
+----------------------------------------------------------------  
+
+| 语言 | 子目录 | 公共仓库 | 管理器 | 推送命令示例 |
+|------|--------|----------|--------|--------------|
+| Node | laybot-node-sdk | ai-sdk-js | npm | `npm publish` |
+| Python | laybot-python-sdk | ai-sdk-py | PyPI | `python -m build && twine upload dist/*` |
+| Go | laybot-go-sdk | ai-sdk-go | go modules | 直接 tag |
+
+拆分命令仍然：
+
+```bash
+git subtree split --prefix=laybot-python-sdk -b py-split
+git push -f py-sdk py-split:main
+git tag v0.1.0 py-split && git push py-sdk v0.1.0
+```
+
+================================================================
+7. 常用脚本 / 命令速查
+----------------------------------------------------------------  
+
+```bash
+# 添加远端
+git remote add php-sdk git@github.com:laybot/ai-sdk-php.git
+
+# 生成分支
+git subtree split --prefix=laybot-php-sdk -b php-split
+
+# 推主分支 + tag
+git push -f php-sdk php-split:main
+git tag vX.Y.Z php-split
+git push php-sdk vX.Y.Z
+
+# 查看当前作者配置
+git config user.name
+git config user.email
+```
+
+可在母仓 **scripts/push-php.sh** 写：
+
+```bash
+#!/bin/bash
+git subtree split --prefix=laybot-php-sdk -b php-split
+git push -f php-sdk php-split:main
+ver=$(jq -r .version laybot-php-sdk/composer.json)
+git tag -f $ver php-split
+git push php-sdk $ver
+```
+
+================================================================  
+FAQ
+----------------------------------------------------------------  
+
+1. **为什么不提交 composer.lock？**  
+   对 **library** 而言应让下游选择依赖版本，官方建议不提交 lock。  
+   对 **应用**（如 demo-site）再提交 lock 防止漂移。
+
+2. **vendor 会不会上传到 GitHub？**  
+   `.gitignore` 层层忽略即可：
+   ```
+   laybot-php-sdk/vendor/
+   laybot-php-sdk/composer.lock
+   ```
+
+3. **需要删除历史再发布？**  
+   公开 tag 后不要改指针；问题可通过新 tag 解决。
+
+4. **IDE 自动补全报错？**  
+   只在本机 `composer install`，不影响版本库。
+
+================================================================  
+至此，你的「母仓 + 多 SDK 子目录 + GitHub + Packagist」流水线已经搭建完成，并兼顾 IDE 开发体验与发布规范。照此指北操作即可长期、稳定地维护所有语言的 LayBot SDK。
