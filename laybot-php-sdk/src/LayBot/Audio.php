@@ -2,22 +2,26 @@
 declare(strict_types=1);
 namespace LayBot;
 
-/** 语音合成/识别 */
+use LayBot\Exception\ValidationException;
+
+/** Text-to-Speech & Speech-to-Text */
 final class Audio extends Base
 {
     public function speech(array $body): array
     {
-        $body = $this->prepare($body,'audio','speech');
-        $uri  = $this->isLaybot ? 'v1/chat' : 'audio/speech';
-        $r    = $this->cli->post($uri,$body);
-        return json_decode((string)$r->getBody(),true,512,JSON_THROW_ON_ERROR);
+        if (!isset($body['model']))  throw new ValidationException('model required');
+        $prep = $this->ready($body,'audio','/v1/chat');   // endpoint=/v1/chat
+        $prep['body']['endpoint'] = '/v1/audio/speech';   // 指定子端点
+        $res  = $this->cli->post($prep['url'],$prep['body']);
+        return json_decode((string)$res->getBody(),true,512,JSON_THROW_ON_ERROR);
     }
 
     public function transcript(array $body): array
     {
-        $body = $this->prepare($body,'audio','transcript');
-        $uri  = $this->isLaybot ? 'v1/chat' : 'audio/transcriptions';
-        $r    = $this->cli->post($uri,$body);
-        return json_decode((string)$r->getBody(),true,512,JSON_THROW_ON_ERROR);
+        if (!isset($body['model']))  throw new ValidationException('model required');
+        $prep = $this->ready($body,'audio','/v1/chat');
+        $prep['body']['endpoint'] = '/v1/audio/transcriptions';
+        $res  = $this->cli->post($prep['url'],$prep['body']);
+        return json_decode((string)$res->getBody(),true,512,JSON_THROW_ON_ERROR);
     }
 }
