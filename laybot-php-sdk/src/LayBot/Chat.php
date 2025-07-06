@@ -1,38 +1,67 @@
 <?php
+declare(strict_types=1);
 namespace LayBot;
 
-use LayBot\Exceptions\LayBotException;
-use Psr\Http\Message\ResponseInterface;
+use LayBot\Exception\ValidationException;
+use LayBot\Stream\{Transport,GuzzleTransport,WorkermanTransport};
 
-class Chat extends Base
+final class Chat extends Base
 {
-    /**
-     * @param array $payload OpenAI 风格参数
-     * @param array $cb ['stream','complete','error'] 回调
-     * @throws LayBotException
-     */
-    public function completions(array $payload,array $cb=[]): ?array
+    /** stream_engine: auto|guzzle|workerman */
+    private string $streamEngine = 'auto';
+
+    public function __construct(string|array|Client $cfg)
     {
-        $stream = $payload['stream'] ?? false;
-        try{
-            $resp = $this->client->postJson('v1/chat',$payload,$stream);
-            if(!$stream){
-                $json=json_decode($resp->getBody(),true);
-                    $cb['complete']??null and $cb['complete']($json,$resp);
-                return $json;
-            }
-            StreamDecoder::decode($resp->getBody(),function($line)use(&$cb){
-                if($line==='[DONE]'){
-                        $cb['stream']??null and $cb['stream'](null,true);
-                }else{
-                    $chunk=json_decode($line,true);
-                        $cb['stream']??null and $cb['stream']($chunk,false);
-                }
-            });
-            return null;
-        }catch(\Throwable $e){
-                $cb['error']??null and $cb['error']($e);
-            throw new LayBotException($e->getMessage(),previous:$e);
+        if (is_array($cfg) && isset($cfg['stream_engine'])) {
+            $this->streamEngine = $cfg['stream_engine'];
+            unset($cfg['stream_engine']);
         }
+        parent::__construct($cfg);
+    }
+
+    private function pickTransport(): Transport
+    {
+        if ($this->streamEngine==='guzzle') return new GuzzleTransport($this->cli);
+        if ($this->streamEngine==='workerman') {
+            if (!self::isWorkermanRuntime()) {
+                throw new \RuntimeException('stream_engine=workerman but loop not running');
+            }
+            return new WorkermanTransport();
+        }
+        /* auto */
+        return self::isWorkermanRuntime()
+            ? new WorkermanTransport()
+            : new GuzzleTransport($this->cli);
+    }
+
+    public function completions(array $body,array $cb=[]): ?array
+    {
+        if (!isset($body['model'],$body['messages'])) {
+            throw new ValidationException('model & messages required');
+        }
+        $stream = !empty($body['stream']);
+        $prep   = $this->ready($body,'chat','/v1/chat');
+
+        if (!$stream) {                      // 非流式直接走 Client
+            $resp=$this->cli->post($prep['url'],$prep['body'],false);
+            $json=json_decode((string)$resp->getBody(),true,512,JSON_THROW_ON_ERROR);
+            ($cb['complete']??null) && $cb['complete']($json);
+            return $json;
+        }
+
+        /* ---- 流式：挑选 Transport ---- */
+        $transport=$this->pickTransport();
+        $headers  = $this->cli->headers();
+        $timeout  = $this->cli->timeout();
+
+        $transport->post($prep['url'], json_encode($prep['body'],JSON_UNESCAPED_UNICODE),
+            $headers, $timeout,
+            function(string $raw,bool $done) use ($cb){
+                if ($done) { ($cb['stream']??fn()=>null)([],true); return; }
+                $json=json_decode($raw,true,512,JSON_THROW_ON_ERROR);
+                ($cb['stream']??fn()=>null)($json,false);
+            });
+
+        return null;
     }
 }
