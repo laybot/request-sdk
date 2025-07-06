@@ -90,3 +90,42 @@ echo "batch id: {$job['id']}\n";
 • SDK：Chat / Doc / File / Batch / Audio / Embed / FineTune / Image 全部到位；  
 • 中台接口字段表亦给出，开发、测试、联调均可直接照此执行。  
 如需再扩扩能力，只需复制模板调用 `$this->ready()` 并改默认 endpoint 即可。祝顺利上线 🚀
+
+```text
+laybot-php-sdk/
+├─ composer.json                # Composer 依赖 & 自动加载
+├─ LICENSE                      # Apache-2.0 英文
+├─ LICENSE-zh-CN.txt            # Apache-2.0 中文说明
+├─ README.md                    # 总体使用文档
+├─ phpstan.neon                 # 静态分析规则
+├─ release.sh                   # 半自动发布脚本（split → 推 tag）
+└─ src/LayBot/                  #—— 业务代码根
+├─ Base.php                 # 能力类父类：构造 Client、ready() 参数处理
+├─ Client.php               # HTTP 客户端：重试 / onReq & onResp 钩子
+├─ StreamDecoder.php        # SSE 行解析器（data:… → JSON）
+├─ helpers.php              # 简易全局函数 lb_chat()/lb_doc()
+│
+├─ Chat.php                 # 聊天 / 思维链流式（自动选流驱动）
+├─ Doc.php                  # 文档/网页解析（LayBot 专属）
+│
+├─ Audio.php                # 语音：speech / transcript
+├─ Embed.php                # Embeddings 向量
+├─ Image.php                # 图像生成 / 编辑
+├─ FineTune.php             # 微调作业：create / retrieve / cancel
+│
+├─ File.php                 # 文件上传 / 下载 / 删除（共用）
+├─ Batch.php                # 批处理：uploadJsonl / create / list / cancel
+│
+├─ Exception/               #—— 统一异常体系
+│   ├─ LayBotException.php     # SDK 总父类
+│   ├─ HttpException.php       # 4xx/5xx 其它
+│   ├─ CreditException.php     # 402 余额不足
+│   ├─ RateLimitException.php  # 429 超速
+│   ├─ ValidationException.php # 参数缺失等
+│   └─ FileException.php       # 文件不可读等
+│
+└─ Stream/                 #—— 流式请求驱动
+├─ Transport.php          # 接口定义（post + onFrame 回调）
+├─ GuzzleTransport.php    # 通用实现（curl + StreamDecoder）
+└─ WorkermanTransport.php # Webman / Workerman 专用超低延迟实现
+```
