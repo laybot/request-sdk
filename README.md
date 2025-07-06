@@ -225,3 +225,89 @@ FAQ
 
 ================================================================  
 至此，你的「母仓 + 多 SDK 子目录 + GitHub + Packagist」流水线已经搭建完成，并兼顾 IDE 开发体验与发布规范。照此指北操作即可长期、稳定地维护所有语言的 LayBot SDK。
+
+
+下面给出「母仓库 laybotSource → 子目录 laybot-php-sdk → 独立 GitHub 仓库 ai-sdk-php」的**标准推送流程**。  
+只要按顺序执行即可：既能提交新版 README.md，又能把 v0.1.2 tag 推到独立仓库，并且不会污染母仓库历史。
+
+假设
+```
+laybotSource/            （母仓库根）
+└─ laybot-php-sdk/       （子目录，要单独发布）
+```
+GitHub 目标仓库：`git@github.com:laybot/ai-sdk-php.git`（远程名我们用 `php-sdk`）
+
+────────────────────────────────  
+① 进入母仓库顶层 & 确认远程  
+────────────────────────────────
+```bash
+cd /path/to/laybotSource          # 一定在根目录！
+
+# 添加远程（只需一次；已有可跳过）
+git remote add php-sdk git@github.com:laybot/ai-sdk-php.git
+```
+
+────────────────────────────────  
+② 提交 README 等新改动  
+────────────────────────────────
+```bash
+git add laybot-php-sdk/README.md
+git commit -m "docs(php-sdk): update README.md"
+```
+
+────────────────────────────────  
+③ 使用 git subtree 生成子仓库快照并推送  
+────────────────────────────────
+```bash
+# 1) 从根目录 split 出一个临时分支
+git subtree split --prefix=laybot-php-sdk -b php-split
+
+# 2) 强推到子仓库的 main 分支
+git push -f php-sdk php-split:main
+```
+> 如果目标仓库主分支叫 `master`，把 `main` 改成 `master` 即可。
+
+────────────────────────────────  
+④ 打新版本 tag（推荐 v0.1.2）并推送  
+────────────────────────────────
+```bash
+git tag v0.1.2 php-split          # 指向刚 split 出来的 commit
+git push php-sdk v0.1.2
+```
+
+────────────────────────────────  
+⑤ 删除临时分支（可选清理）  
+────────────────────────────────
+```bash
+git branch -D php-split
+```
+
+────────────────────────────────  
+⑥ Packagist 自动更新  
+────────────────────────────────
+仓库若已在 Packagist 注册且配置 Webhook，5 分钟内就能抓到 **v0.1.2**。  
+如需立即生效，可在 Packagist 页面点 “Update” 按钮。
+
+────────────────────────────────  
+常见错误 & 解法  
+────────────────────────────────
+| 现象 | 原因 | 处理 |
+|------|------|------|
+| `You need to run this command from the toplevel of the working tree.` | 在子目录执行了 `git subtree split` | 回到 **laybotSource 根目录** 再执行 |
+| `fatal: tag 'v0.1.1' already exists` | 同名 tag 已存在 | ① 删除旧 tag (`git tag -d v0.1.1 && git push php-sdk :refs/tags/v0.1.1`)；② 或直接用新版本号 |
+| 子仓库 README 还是旧的 | 忘记 `git add` / `git commit` 或忘记 `git push -f php-sdk php-split:main` | 按步骤重新提交 |
+
+────────────────────────────────  
+快速备忘  
+────────────────────────────────
+```bash
+# 一行命令式（已改 README、远程存在）
+git add laybot-php-sdk && git commit -m "docs: readme" \
+&& git subtree split --prefix=laybot-php-sdk -b php-split \
+&& git push -f php-sdk php-split:main \
+&& git tag v0.1.2 php-split && git push php-sdk v0.1.2 \
+&& git branch -D php-split
+```
+
+执行完毕后，`composer require laybot/ai-sdk-php:^0.1` 即可获得包含新版 README 的包。  
+若还有推送问题，把终端完整错误贴上来即可进一步排查。
