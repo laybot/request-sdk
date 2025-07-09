@@ -142,6 +142,7 @@ $http = new HttpClient([
 
 本项目基于 MIT 开源协议发布。欢迎商用及二次封装。
 
+> © 2025 LayBot Inc. – LayBot LingTeach AI
 ---
 
 ## 🤝 贡献
@@ -149,9 +150,5 @@ $http = new HttpClient([
 欢迎 PR、Issue 参与共建！  
 规范：PSR-12 + PHPStan 八级 + PHPUnit。
 
----
-
-> © 2025 LayBot Inc.  
-> 如需咨询/商务接入等请访问 [https://ai.laybot.cn](https://ai.laybot.cn) 或邮件 hello@laybot.cn
-
+>如需咨询/商务接入等请访问 [https://ai.laybot.cn](https://ai.laybot.cn) 或邮件 larry@laybot.cn
 ---
