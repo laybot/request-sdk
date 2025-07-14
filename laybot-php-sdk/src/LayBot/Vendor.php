@@ -23,6 +23,7 @@ final class Vendor
                 'chat'  => '/v1/chat',
                 'embed' => '/v1/chat',
             ],
+            'hdr'  => 'laybotHeader',
         ],
 
         'openai' => [
@@ -100,6 +101,10 @@ final class Vendor
     }
 
     /* ---------- 各厂商 Header 组装 ---------- */
+    private static function laybotHeader(string $k): array
+    {
+        return ['X-API-Key' => $k];
+    }
 
     private static function bearerHeader(string $k): array
     {

@@ -47,9 +47,6 @@ final class Client
             $hdr,
             Vendor::patchHeaders($cfg['vendor'] ?? Vendor::DEFAULT, $apiKey)   // ★
         );
-        if (!isset($hdr['Authorization']) && !isset($hdr['api-key'])){
-            $hdr['Authorization'] = 'Bearer '.$apiKey;
-        }
         /* ---------- 3. merge user headers / timeout ---------- */
         $this->headers = array_merge($hdr, $cfg['guzzle']['headers'] ?? []);
         $this->timeout = $cfg['guzzle']['timeout'] ?? 60;

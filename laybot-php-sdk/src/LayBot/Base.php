@@ -51,7 +51,9 @@ abstract class Base
         } else {
             unset($body['capability']);          // 直连官方
         }
-        return ['url'=>ltrim($path,'/'),'body'=>$body];
+        $full = $this->cli->baseUri().ltrim($path,'/');
+        $rel  = ltrim($path,'/');
+        return ['url'=>$full, 'rel'=>$rel, 'body'=>$body];
     }
 
     /** Workerman 环境探测：只在 loop 已启动时返回真 */

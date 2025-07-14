@@ -50,7 +50,7 @@ final class Chat extends Base
         $prep = $this->ready($body, 'chat', $defPath);
         $stream = !empty($body['stream']);
         if (!$stream) {                      // 非流式直接走 Client
-            $resp=$this->cli->post($prep['url'],$prep['body'],false);
+            $resp=$this->cli->post($prep['rel'],$prep['body'],false);
             $json=json_decode((string)$resp->getBody(),true,512,JSON_THROW_ON_ERROR);
             ($cb['complete']??null) && $cb['complete']($json);
             return $json;
@@ -61,7 +61,11 @@ final class Chat extends Base
         $headers  = $this->cli->headers();
         $timeout  = $this->cli->timeout();
 
-        $transport->post($prep['url'], json_encode($prep['body'],JSON_UNESCAPED_UNICODE),
+        $transport->post(
+                $prep['url'],
+                json_encode($prep['body'],
+                JSON_UNESCAPED_UNICODE
+            ),
             $headers, $timeout,
             function(string $raw,bool $done) use ($cb){
                 if ($done) { ($cb['stream']??fn()=>null)([],true); return; }
