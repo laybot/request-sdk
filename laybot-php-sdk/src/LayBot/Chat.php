@@ -36,12 +36,19 @@ final class Chat extends Base
 
     public function completions(array $body,array $cb=[]): ?array
     {
+
+
         if (!isset($body['model'],$body['messages'])) {
             throw new ValidationException('model & messages required');
         }
-        $stream = !empty($body['stream']);
-        $prep   = $this->ready($body,'chat','/v1/chat');
 
+        $defPath = $body['endpoint']
+            ?? Vendor::defaultEndpoint($this->vendor, 'chat')
+            ?? '/v1/chat';
+
+        /* --------- 统一准备 URL + body -------- */
+        $prep = $this->ready($body, 'chat', $defPath);
+        $stream = !empty($body['stream']);
         if (!$stream) {                      // 非流式直接走 Client
             $resp=$this->cli->post($prep['url'],$prep['body'],false);
             $json=json_decode((string)$resp->getBody(),true,512,JSON_THROW_ON_ERROR);

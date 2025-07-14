@@ -7,17 +7,21 @@ abstract class Base
 {
     protected Client $cli;
     protected bool   $isLaybot;
+    protected string $vendor = Vendor::DEFAULT;
 
     public function __construct(string|array|Client $cfg)
     {
         if ($cfg instanceof Client) {
             $this->cli      = $cfg;
             $this->isLaybot = self::looksLikeLaybot($cfg->baseUri());
+            $this->vendor   = $this->isLaybot ? Vendor::DEFAULT : 'custom';
             return;
         }
         if (is_string($cfg)) { $cfg=['apikey'=>$cfg]; }
-        $base = $cfg['base'] ?? 'https://api.laybot.cn';
-        $this->cli      = new Client($cfg['apikey'],$base,$cfg);
+        $this->vendor = $cfg['vendor'] ?? Vendor::DEFAULT;
+        /* base 没写 ⇒ 用 vendor 默认域名 */
+        $base = $cfg['base'] ?? Vendor::defaultBase($this->vendor);
+        $this->cli      = new Client($cfg['apikey'], $base, $cfg + ['vendor'=>$this->vendor]);
         $this->isLaybot = self::looksLikeLaybot($base);
     }
     private static function looksLikeLaybot(string $base): bool

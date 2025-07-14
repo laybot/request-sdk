@@ -43,12 +43,13 @@ final class Client
 
         /* ---------- 2. default headers ---------- */
         $hdr = ['Content-Type'=>'application/json'];
-        if (str_contains($this->base,'openai.azure.com')) {
-            $hdr['api-key'] = $apiKey;            // Azure
-        } else {
-            $hdr['Authorization'] = 'Bearer '.$apiKey; // LayBot / OpenAI / DeepSeek
+        $hdr = array_merge(
+            $hdr,
+            Vendor::patchHeaders($cfg['vendor'] ?? Vendor::DEFAULT, $apiKey)   // ★
+        );
+        if (!isset($hdr['Authorization']) && !isset($hdr['api-key'])){
+            $hdr['Authorization'] = 'Bearer '.$apiKey;
         }
-
         /* ---------- 3. merge user headers / timeout ---------- */
         $this->headers = array_merge($hdr, $cfg['guzzle']['headers'] ?? []);
         $this->timeout = $cfg['guzzle']['timeout'] ?? 60;
