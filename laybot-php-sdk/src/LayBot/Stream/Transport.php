@@ -6,11 +6,19 @@ namespace LayBot\Stream;
 interface Transport
 {
     /**
-     * @param string   $url       完整 URL（不带 base）
-     * @param string   $json      请求体
-     * @param string[] $headers   HTTP header 列表
-     * @param int      $timeout   秒
-     * @param callable $onFrame   fn(string $rawLine,bool $done):void
+     * @param string   $url             完整 URL
+     * @param string   $json            JSON 字符串
+     * @param string[] $headers         HTTP 头
+     * @param int      $connectTimeout  建连超时（秒）
+     * @param int      $idleTimeout     空闲超时（秒，0 = 不限制）
+     * @param callable $onFrame         fn(string $raw,bool $done):void
      */
-    public function post(string $url, string $json, array $headers, int $timeout, callable $onFrame): void;
+    public function post(
+        string   $url,
+        string   $json,
+        array    $headers,
+        int      $connectTimeout,
+        int      $idleTimeout,
+        callable $onFrame
+    ): void;
 }

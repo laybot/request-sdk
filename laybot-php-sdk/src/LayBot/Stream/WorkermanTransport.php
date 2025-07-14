@@ -5,59 +5,80 @@ namespace LayBot\Stream;
 use Workerman\Connection\AsyncTcpConnection;
 use Workerman\Timer;
 
-/** Workerman 事件循环下的超低延迟实现 */
+/** 最低延迟的 SSE 传输：基于 Workerman 事件循环 */
 final class WorkermanTransport implements Transport
 {
-    public function post(string $url, string $json, array $headers,
-                         int $timeout, callable $onFrame): void
+    public function post(
+        string   $url,
+        string   $json,
+        array    $headers,
+        int      $connectTimeout,
+        int      $idleTimeout,
+        callable $onFrame
+    ): void
     {
-        $u=parse_url($url); $ssl=$u['scheme']==='https';
-        $addr  = ($ssl ? 'tls' : 'tcp').'://'.$u['host'].':'.($u['port'] ?? ($ssl ? 443 : 80));
-        $query = isset($u['query']) && $u['query'] !== '' ? '?'.$u['query'] : '';
+        $u    = parse_url($url);
+        $ssl  = $u['scheme'] === 'https';
+        $addr = ($ssl ? 'tls' : 'tcp') . '://' . $u['host'] . ':' .
+            ($u['port'] ?? ($ssl ? 443 : 80));
+        $query = isset($u['query']) && $u['query'] !== '' ? '?' . $u['query'] : '';
         $path  = ($u['path'] ?? '/') . $query;
 
-
-        /* 构造 HTTP 请求行+头 */
-        $hdr="POST $path HTTP/1.1\r\nHost: {$u['host']}\r\nConnection: close\r\n".
-            "Accept: text/event-stream\r\n".
-            "Content-Length: ".strlen($json)."\r\n";
-        foreach ($headers as $k=>$v) {
-            $hdr.= (is_int($k)?$v:"$k: $v")."\r\n";
+        /* 请求行 + 头 */
+        $hdr  = "POST $path HTTP/1.1\r\nHost: {$u['host']}\r\nConnection: keep-alive\r\n";
+        $hdr .= "Accept: text/event-stream\r\n";
+        $hdr .= "Content-Length: " . strlen($json) . "\r\n";
+        foreach ($headers as $k => $v) {
+            $hdr .= (is_int($k) ? $v : "$k: $v") . "\r\n";
         }
-        $conn=new AsyncTcpConnection($addr);
-        if($ssl)$conn->transport='ssl';
-        $conn->onConnect=fn($c)=>$c->send($hdr."\r\n".$json);
+        /* ---------- 建连 ---------- */
+        $conn = new AsyncTcpConnection($addr);
+        if ($ssl) $conn->transport = 'ssl';
+        $conn->connectTimeout = $connectTimeout;
 
-        $headerRead=false;
-        $timer=Timer::add($timeout,fn()=>$conn->close(),[],false);
+        /* ---------- idle 定时 ---------- */
+        $idleTimer = null;
+        $resetIdle = static function() use (&$idleTimer,$idleTimeout,$conn){
+            if ($idleTimeout<=0) return;
+            if ($idleTimer) Timer::del($idleTimer);
+            $idleTimer = Timer::add($idleTimeout, static fn()=>$conn->close(), [], false);
+        };
 
-        $conn->onMessage=function($c,$buf) use (&$headerRead,$onFrame){
-            /* 跳过响应头 */
-            if(!$headerRead){
+        $headerDone = false;
+
+        $conn->onConnect = static function($c) use ($hdr,$json,$resetIdle){
+            $c->send($hdr."\r\n".$json);
+            $resetIdle();
+        };
+
+        $conn->onMessage = static function($c,$buf) use (&$headerDone,$onFrame,$resetIdle){
+            if(!$headerDone){
                 $pos=strpos($buf,"\r\n\r\n");
-                if($pos===false)return;
-                $buf=substr($buf,$pos+4);
-                $headerRead=true;
+                if($pos===false) return;
+                $buf        = substr($buf,$pos+4);
+                $headerDone = true;
             }
-            /* buf 里可能有多行 SSE */
+            $resetIdle();
             foreach (explode("\n",$buf) as $line){
-                $line=trim($line); if(!str_starts_with($line,'data:')) continue;
-                $payload=trim(substr($line,5));
-                if($payload==='[DONE]'){ $onFrame('',true); continue; }
+                $line = trim($line);
+                if (!str_starts_with($line,'data:')) continue;
+                $payload = trim(substr($line,5));
+                if ($payload === '[DONE]'){ $onFrame('',true); continue; }
                 $onFrame($payload,false);
             }
         };
-        $conn->onClose = function() use($timer,$onFrame){
-            Timer::del($timer);
-            $onFrame('', true);          // 通知 Chat 流结束
+
+        $close = static function() use (&$idleTimer,$onFrame){
+            if ($idleTimer) Timer::del($idleTimer);
+            $onFrame('',true);
         };
-        $conn->onError = function() use($timer,$onFrame){
-            Timer::del($timer);
-            $onFrame('', true);
-        };
+        $conn->onClose = $close;
+        $conn->onError = $close;
+
         $conn->connect();
-        /* ────── 防止连接对象被垃圾回收 ────── */
-        static $pool = [];                               // ① 声明静态池
-        $pool[spl_object_id($conn)] = $conn;             // ② 保存强引用
+
+        /* 防 GC */
+        static $pool=[];
+        $pool[spl_object_id($conn)]=$conn;
     }
 }

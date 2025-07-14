@@ -16,24 +16,29 @@
 
 - 本 SDK 内置 **自动流式驱动检测**  
   Webman / Workerman 进程 → AsyncTcpConnection，毫秒级逐 token 推流，对于Webman框架在AI流式输出提速更友好；  
-  在 Laravel / ThinkPHP / 其他 FPM 环境 → Guzzle Stream，零依赖零配置。
+  在 Laravel / ThinkPHP / Yii 等其他 FPM 环境 → Guzzle Stream，零依赖零配置。
 - 告别“整段再返”，实时展示思维链。
 - 本 SDK 默认为LayBot专属模型调用，同时也支持使用本SDK的能力直接面向DeepSeek,OpenAI这些大模型api调用场景
+>一句话：**更快、更稳、更省心**。尤其在 Webman / Workerman 框架下，可将思维链 (CoT) 推流延迟压到毫秒级，彻底解决官方 `workerman/http-client` “整段返回” 的痛点
 ---
 
 ## ✨ 为什么选择 LayBot 灵语智教？
 
-| 功能 | 价值 |
-|------|------|
-| 🛰️ **流式 SSE** | `stream:true` 即获毫秒级增量反馈 |
-| 🛡️ **企业级安全** | API-Key / IP 白名单、余额预扣、敏感词脱敏 |
-| 💰 **成本透明** | 按教育任务颗粒度计费，Credit 明细实时可查 |
-| 🧠 **教学深度适配** | 预置 K12/高教/国际课程专用推理参数 |
-| 🚀 **智能分层教学** | 动态生成梯度化习题（基础→拓展→竞赛） |
-| ✍️ 作业批改引擎 | 支持数学公式/图文混排版面解析（LB-Aethel） |
-| 🌐 国际课程适配 | A-Level/AP/IB成绩单智能分析+选课推荐 |
-| 📝 教研创作加速 | 3秒生成考点明确的试卷（支持LaTeX输出） |
-| 🛡️ 教育合规保障 | 内置K12内容过滤+GDPR合规审计 |
+| 功能                  | 价值                                                          |
+|---------------------|-------------------------------------------------------------|
+| 🛰️ **流式 SSE**      | `stream:true` 即获毫秒级增量反馈                                     |
+| 🛡️ **企业级安全**       | API-Key / IP 白名单、余额预扣、敏感词脱敏                                 |
+| 🛰️ **Idle-Guard™** | 只检测“连续空闲 N 秒”而**不限制总时长**。超长输出 & 网络抖动再大也不会被硬掐。               |
+| ♻️ **3 次指数退避**      | 429 / 5xx 自动重试 200 ms → 400 ms → 800 ms，失败率骤降。              |
+| 🛡️ **细粒度异常**       | Credit 枯竭、RateLimit、HTTP 异常分流捕获。                            |
+| 💰 **成本透明**         | 按教育任务颗粒度计费，Credit 明细实时可查                                    |
+| 🛡️ **可作为AI调用工具**   | 该SDK除了作为LayBot系列模型的调用工具，也支持直连OpenAI/DeepSeek等系列大模型平台，工具极简易用 |
+| 🧠 **教学深度适配**       | 预置 K12/高教/国际课程专用推理参数                                        |
+| 🚀 **智能分层教学**       | 动态生成梯度化习题（基础→拓展→竞赛）                                         |
+| ✍️ 作业批改引擎           | 支持数学公式/图文混排版面解析（LB-Aethel）                                  |
+| 🌐 国际课程适配           | A-Level/AP/IB成绩单智能分析+选课推荐                                   |
+| 📝 教研创作加速           | 3秒生成考点明确的试卷（支持LaTeX输出）                                      |
+| 🛡️ 教育合规保障          | 内置K12内容过滤+GDPR合规审计                                          |
 ---
 
 ## 📚 旗舰教育智能模型（节选）
@@ -67,18 +72,19 @@ composer require laybot/ai-sdk
 ```html  ⬅️ 改为 HTML 示例 ⬅️
 <laybot-ai-chat
         model="LB-Cosmos"
-        api-key="sk-live-xxxxxxxx"
+        api-key="sk-teach-xxxxxxxx"
         prompt="用高中难度讲解牛顿第二定律"
 >
     <!-- 组件自动处理流式输出 -->
 </laybot-ai-chat>
 ```
-
+### 连接 LayBot（推荐）
 ```php
 <?php
 // 课堂教学场景：动态分层讲解
 $chat->completions([
     'model' => 'LB-Cosmos',
+    'stream'   => true,
     'messages' => [
         ['role' => 'user', 'content' => '为初二学生讲解浮力定律']
     ],
@@ -96,30 +102,16 @@ $chat->completions([
     'task_type' => 'grading' // 激活批改模式
 ]);
 ```
+### 直连 OpenAI / DeepSeek / Groq…
 
 ```php
-
-<?php
-require 'vendor/autoload.php';
-
-use Laybot\Chat;
-
-/** 初始化（支持 PSR-18 容器内全局共享） */
-$chat = new Chat('sk-live-xxxxxxxx');
-
-/** 流式课堂问答 */
-$chat->completions([
-    'model'    => 'LB-Cosmos',
-    'stream'   => true,
-    'messages' => [
-        ['role'=>'user','content'=>'请用高中难度讲解牛顿第二定律']
-    ]
-],[
-    'stream'   => fn($chunk,$done) => print $done
-                                   ? PHP_EOL
-                                   : ($chunk['choices'][0]['delta']['content'] ?? ''),
-    'complete' => fn($json)        => print_r($json)
+$chat = new Chat([
+    'apikey' => 'sk-teach-xxxxx',
+    'vendor' => 'openai',          // 一行切换
+    'guzzle' => ['proxy'=>'http://127.0.0.1:7890']
 ]);
+$chat->completions([...]);
+
 ```
 
 ---
@@ -143,23 +135,48 @@ $chat->completions([
 | 40101 | 401 | API_KEY_INVALID — Key 不存在或禁用 |
 | 40200 | 402 | INSUFFICIENT_CREDIT — 余额不足 |
 | 42900 | 429 | RATE_LIMITED — 触发限流 |
-| 50000 | 500 | INTERNAL_ERROR — 平台内部异常 |
 
 > 完整列表见文档 <https://ai.laybot.cn/docs/errors>
 
 ---
 
 ## 🔧 高级用法
-
+### 🛠️ 一键覆写 HTTP 行为
+DK 把 全部 Guzzle 选项 透传出来，让你可以像写配置文件一样控制底层 HTTP：
 ```php
-// 自定义超时 / 代理
-$chat = new Laybot\Chat([
+$chat = new Chat([
     'apikey' => 'sk-xxx',
-    'base'   => 'https://api.laybot.cn',
-    'guzzle' => ['timeout'=>30,'proxy'=>'http://127.0.0.1:7890']
-]);
-```
 
+    /* ① 直接改域名 / 端口 */
+    'base'   => 'https://my.corp.gateway',
+
+    /* ② 切换官方厂商，自动附带对应 Endpoint/Headers */
+    'vendor' => 'openai',
+
+    /* ③ 深度覆写 Guzzle 选项（将与 SDK 默认配置递归合并） */
+    'guzzle' => [
+        'proxy'        => 'http://127.0.0.1:7890', // HTTP/SOCKS 代理
+        'verify'       => false,                   // 跳过 SSL 证书
+        'http_errors'  => false,                   // 请求 4xx/5xx 不抛异常
+        'debug'        => fopen('php://stderr','w')// 输出原始报文
+    ],
+
+    /* ④ 超时分离：connect / idle */
+    'timeout' => ['connect'=>5,'idle'=>300]
+]);
+
+/* ⑤ 仅对本次请求改 Endpoint（body 内写 endpoint 字段即可） */
+$chat->completions([
+    'model'     => 'gpt-4o-mini',
+    'messages'  => [['role'=>'user','content'=>'Hi']],
+    'endpoint'  => '/v1/chat/completions'   // 单次覆盖路径
+]);
+
+```
+- proxy / keepalive / headers / debug … 想配就配，不必改 SDK 源码。
+- base + endpoint 双重覆盖，兼容公司内网网关 / API Mock / AB 测试。
+- 所有配置都是“增量合并”，只写差异即可；默认值继续生效。
+- 仍然享受 Idle-Guard™、自动重试、细粒度异常等全部特性。
 ---
 
 ## 🚀 路线图
