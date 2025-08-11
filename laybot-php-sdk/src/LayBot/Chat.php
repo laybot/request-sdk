@@ -74,19 +74,43 @@ final class Chat extends Base
         $idleTimeout   = $this->cli->idleTimeout();       // 连续静默 N 秒
         $connectTmo    = $this->cli->timeout()['connect']; // TCP 建连超时
 
+        $buffer = '';          // 用来拼接可能被分片的 JSON
+
         $transport->post(
             $prep['url'],
             json_encode($prep['body'], JSON_UNESCAPED_UNICODE),
             $headers,
             $connectTmo,
             $idleTimeout,
-            function (string $raw, bool $done) use ($cb): void {
-                if ($done) {                     // 结束帧
-                    ($cb['stream'] ?? fn() => null)([], true);
+            function (string $raw, bool $done) use (&$buffer, $cb): void {
+                /* ---- 服务器宣告结束 or 连接关闭 ---- */
+                if ($done) {
+                    // 如果还有残留半截 JSON，尝试最后一次解码
+                    if ($buffer !== '') {
+                        try {
+                            $json   = json_decode($buffer, true, 512, JSON_THROW_ON_ERROR);
+                            ($cb['stream'] ?? fn () => null)($json, false);
+                        } catch (\JsonException) {
+                            // 忽略残缺碎片
+                        }
+                        $buffer = '';
+                    }
+                    ($cb['stream'] ?? fn () => null)(null, true);
                     return;
                 }
-                $json = json_decode($raw, true, 512, JSON_THROW_ON_ERROR);
-                ($cb['stream'] ?? fn() => null)($json, false);
+                /* ---- 正常数据帧 ---- */
+                if ($raw === '') {
+                    // 心跳行（极少出现），直接忽略
+                    return;
+                }
+                $buffer .= $raw;
+                try {
+                    $json   = json_decode($buffer, true, 512, JSON_THROW_ON_ERROR);
+                    $buffer = '';                              // 解码成功，清空缓冲
+                    ($cb['stream'] ?? fn () => null)($json, false);
+                } catch (\JsonException) {
+                    // JSON 还没接全，继续等待下一帧
+                }
             }
         );
 
