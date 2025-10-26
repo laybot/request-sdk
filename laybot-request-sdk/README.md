@@ -1,154 +1,137 @@
-# LayBot Request SDK · PHP
-
-> 现代化、极简、易扩展的 PHP 网络请求工具库  
-> Powered by **LayBot**
-
-[![LayBot® Certified](https://img.shields.io/badge/LayBot%E2%84%A2-Request_SDK-0F1C3F?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0iI0ZGRiIgZD0iTTEyIDBDNS4zNyAwIDAgNS4zNyAwIDEyczUuMzcgMTIgMTIgMTIgMTItNS4zNyAxMi0xMlMxOC42MyAwIDEyIDB6bTAgMjJhMTAgMTAgMCAxIDEgMC0yMCAxMCAxMCAwIDAgMSAwIDIweiIvPjxwYXRoIGZpbGw9IiNGREQ2MDAiIGQ9Ik0xMiA1bDQuMzggNC4zOEwxMiAxMy43NyA3LjYyIDkuNCAxMiA1em0wIDQuM2wtMS40IDEuNEwxMiAxMmw0LjQtNC40TDEyIDkuM3oiLz48L3N2Zz4=)](https://ai.laybot.cn)
-[![Packagist](https://img.shields.io/packagist/v/laybot/request-sdk?label=sdk&logo=composer&color=885630)](https://packagist.org/packages/laybot/request-sdk)
-[![License](https://img.shields.io/badge/License-MIT-3DA639?logo=openaccess)](LICENSE)
-[![PHP](https://img.shields.io/packagist/php-v/laybot/request-sdk?logo=php&color=777BB3)](https://www.php.net/)
+<h1 >LayBot / Request-SDK · PHP</h1>
+<p>
+  Enterprise-grade HTTP &amp; Streaming Client<br>
+  <b>Cross-Framework · Zero-Boilerplate · Ultra-Low Latency</b>
+</p>
 
 ---
 
-## 🚀 特性一览
+## ✨ 0. LayBot 是什么？
 
-- ⚡ 依赖 GuzzleHttp 7，现代 API、强大中间件
-- 🌀 简单、直观、支持 get/post/json/upload/retry 等常见场景
-- 🔌 插件式扩展（InnerAPI/OSSAPI/自定义API）
-- 🤝 完全兼容 Laravel / Webman / CLI / 传统 PHP
-- 🏆 工业级错误处理与 JSON 自动解析
-- 💡 不强依赖任何业务、无敏感地址硬编码，适于开源和二次封装
+**LayBot · 灵语智教** —— 面向教育与知识管理场景的 AIGC 中台。  
+平台自研大模型、矢量检索与知识图谱技术，并持续向社区开放 **LayBot 系列 SDK**，  
+涵盖 AI 接口、消息推送、存储、网络通信等多个方向。
+
+> `laybot/request-sdk` 正是该系列的一员：  
+> 一把「瑞士军刀」式的 **Server-to-Server 网络通信基座**。  
+> 任何 PHP 项目只需三行代码，即可畅享高速 HTTP 与低延迟 SSE 流。
 
 ---
 
-## 📦 安装
+## ✨ 1. 核心特性
+
+| 类别 | 能力 |
+|------|------|
+| 双栈传输 | Guzzle 同步 & Workerman 协程 —— FPM / CLI / Webman 一键适配 |
+| 全协议覆盖 | GET / POST / PUT / DELETE / 文件上传 / SSE 流式推送 |
+| 企业级稳健性 | 指数退避重试、低速检测、空闲超时、严格异常分层 |
+| 插件化架构 | Transport × Signer × Middleware 三层解耦，Trace / 熔断 / OpenTelemetry 随插随用 |
+| 鉴权即插即用 | Bearer / ApiKey / Basic / Hmac-SHA256 / InnerToken …… 开箱即用，支持自定义 |
+| 精准异常体系 | HttpException / JsonException / BizException / StreamException —— 一目了然 |
+| 生态集成 | 官方附带两条快捷 Facade：<br>① LayBot OpenAPI 调用<br>② 内网微服务 Token 调用 |
+
+---
+
+## 📦 2. 安装
 
 ```bash
-composer require laybot/request-sdk
+composer require laybot/request-sdk:^1.0
+
+# 如需协程加速（Webman / Swoole 场景）
+composer require workerman/http-client --dev
 ```
+
+## 🛠 3. 模块总览
+
+| 模块 | 组件 | 说明 |
+|------|------|------|
+| Client | `Client` | 核心入口：get / postJson / upload / stream |
+| Transport | `GuzzleTransport` / `WorkermanTransport` | 同步 + 协程，按环境自动切换 |
+| Signer | None / Bearer / Basic / ApiKey / Hmac / Inner | 一行代码替换 Header 签名 |
+| Middleware | Retry / Trace / CircuitBreaker(预留) | PSR-3 追踪、熔断、限流等能力 |
+| Stream | `Util\StreamDecoder` | 按行解析 `data:` 帧，自动识别 `[DONE]` |
+| Facade | `PartnerApi` / `InnerApi` | LayBot 官方 OpenAPI & 微服务快捷封装 |
 
 ---
 
-## 🏃‍♂️ 快速上手
+## 🚀 4. 快速上手
 
-### 1. 基本用法
+### 4.1 Webman 协程 + 大模型流式响应
 
 ```php
-require 'vendor/autoload.php';
+$cli = new Client(new Config(
+        baseUri:   'https://api.openai.com',
+        transport: 'workerman'));               // 协程零拷贝
 
-use LayBot\Request\HttpClient;
-
-$http = new HttpClient([
-    'base_uri' => 'https://httpbin.org',
-    'timeout'  => 6.0,
-    'headers'  => ['User-Agent' => 'laybot-request-sdk']
-]);
-
-// GET 请求
-$result = $http->get('/get');
-print_r($result);
-
-// POST JSON
-$res = $http->post('/post', ['foo'=>'bar']);
-print_r($res);
-
-// 上传文件
-$res = $http->upload('/post', [
-    [
-        'name'     => 'file',
-        'contents' => fopen('logo.png', 'r'),
-        'filename' => 'logo.png'
-    ]
-]);
+$cli->stream('/v1/chat/completions', [
+        'stream'   => true,
+        'messages' => [['role'=>'user','content'=>'你好']]
+    ],
+    function(string $chunk,bool $done){
+        if (!$done) {
+            echo json_decode($chunk,true)['choices'][0]['delta']['content'];
+        }
+});
 ```
 
-### 2. 错误处理与异常捕获
+### 4.2 ThinkPHP / FPM 场景
 
 ```php
-try {
-    $data = $http->get('/404-not-found');
-} catch (\RuntimeException $e) {
-    // 统一捕捉请求异常
-    echo $e->getMessage();
-}
+use LayBot\Request\{Client,Config};
+
+$http = new Client(new Config('https://api.example.com'));
+
+/* GET */
+$user = $http->get('/v1/user/42');
+
+/* POST JSON */
+$http->postJson('/v1/user', ['name'=>'Alice']);
 ```
 
----
 
-## 🔌 插件与自定义能力
 
-支持以插件方式扩展内网调用、特殊签名、加解密等：
-
-**示例：扩展 InnerApi 插件能力**
-```php
-use LayBot\Request\Inner\InnerApi;
-
-// 由你的 config/.env 提供参数
-$inner  = new InnerApi($baseUri, $token);
-
-$apiKey = $inner->generateKey($endpoint, $userId);
-// $endpoint 等接口路径由业务层指定，避免泄露内部结构
-```
-
-**可自定义插件能力**
-- LayBot\Request\OssApi  (自定义 OSS 签名)
-- LayBot\Request\YourApi  (如你的自定义外部微服务)
-
----
-
-## 📝 设计理念
-
-- **核心无业务耦合**  
-  仅实现请求基础能力与容错，特殊能力插件化
-- **高安全**  
-  所有接口路径、密钥等敏感信息均从外部显式注入
-- **即插即用**  
-  支持任意 Composer 场景，“只管用，不需二次修改”
-
----
-
-## 🔧 高级用法
-
-#### 1. 配置 Guzzle 代理/证书/重试
+### 4.3 文件上传
 
 ```php
-$http = new HttpClient([
-    'timeout' => 10,
-    'guzzle' => [
-        'proxy'   => 'http://127.0.0.1:7890',
-        'verify'  => false,
-        // 也可自定义 Guzzle HandlerStack
-    ]
-]);
+$http->upload(
+    '/v1/file',                // URL
+    'file',                    // 表单字段名
+    __DIR__.'/avatar.png',     // 本地文件
+    ['scene' => 'avatar']      // 额外表单
+);
 ```
 
-#### 2. Stream/Download (按需扩展)
+### 4.4 LayBot OpenAPI 一键调用
 
 ```php
-// 若需实现流式读取/大文件下载，可自定义追加 stream 方法
+$openapi = new \LayBot\Request\Facade\PartnerApi(
+    'https://openapi.laybot.cn', $appKey, $secret);
+
+$result = $openapi->accountSync(['since'=>'2024-01-01']);
 ```
 
 ---
 
-## 🛠️ 控制反转 & 框架集成
+## 📝 5. 路线图
 
-- Laravel：建议通过 ServiceProvider 注册
-- Webman：可放至 support/bootstrap.php 并用依赖注入单例使用
-- CLI/传统：实例化后直接用
+| 版本 | 里程碑 |
+|------|--------|
+| 1.0  | 稳定版：双栈 Transport / 重试 / 签名 / SSE |
+| 1.1  | 熔断器、速率限制中间件 |
+| 1.2  | OpenTelemetry TraceId 自动注入 |
+| 2.x  | Async PSR-18 Bridge、PHP 8.2 readonly 优化 |
 
 ---
 
-## 📜 LICENSE
+## 🤝 6. 贡献方式
 
-本项目基于 MIT 开源协议发布。欢迎商用及二次封装。
+1. `git clone` → `composer install --dev`
+2. 确保 `vendor/bin/phpunit` 全绿
+3. 执行 `composer cs`（PSR-12）通过后提交 PR
 
-> © 2025 LayBot Inc. – LayBot LingTeach AI
 ---
 
-## 🤝 贡献
+## 📄 7. License
 
-欢迎 PR、Issue 参与共建！  
-规范：PSR-12 + PHPStan 八级 + PHPUnit。
-
->如需咨询/商务接入等请访问 [https://ai.laybot.cn](https://ai.laybot.cn) 或邮件 larry@laybot.cn
----
+MIT License — 完全自由商用，转载请保留版权及作者信息。
+```
