@@ -1,48 +1,64 @@
 <?php
 declare(strict_types=1);
+
 namespace LayBot\Request\Transport;
 
 use LayBot\Request\Contract\TransportInterface;
-use LayBot\Request\Util\StreamDecoder;
 use LayBot\Request\Exception\HttpException;
 use LayBot\Request\Exception\StreamException;
+use LayBot\Request\Util\StreamDecoder;
+use GuzzleHttp\Psr7\Utils;
+use Psr\Log\LoggerInterface;
 use Workerman\Connection\AsyncTcpConnection;
 use Workerman\Timer;
-use GuzzleHttp\Psr7\Utils;
-use Psr\Http\Message\StreamInterface;
 
+/**
+ * Workerman 事件循环下的低延迟流式传输。
+ * 若当前不在事件循环或未安装 workerman，则自动回退 GuzzleTransport。
+ */
 final class WorkermanTransport implements TransportInterface
 {
-    public function request(string $m,string $url,array $opt): array
-    {
-        $done = false; $ret = [];
-        $cli  = new \Workerman\Http\Client;
-        $cli->request($m,$url,$opt,function($res) use(&$done,&$ret){
-            $ret = $res; $done=true;
-        });
-        // yield until callback
-        while(!$done){ \Swoole\Coroutine::sleep(0.001); }
-        if($ret['status']>=400){
-            throw new HttpException('HTTP '.$ret['status'],$ret['status'],$ret['body']);
-        }
-        return ['status'=>$ret['status'],'body'=>$ret['body'],'headers'=>$ret['headers']];
+    private GuzzleTransport $fallback;
+
+    public function __construct(
+        string $baseUri,
+        float  $timeout,
+        bool   $verify,
+        int    $retry,
+        LoggerInterface $logger
+    ){
+        $this->fallback = new GuzzleTransport($baseUri,$timeout,$verify,$retry,$logger);
     }
 
-    /** 完全复用你在 ai-sdk 中的实现，支持 idleTimeout */
-    public function stream(string $method, string $url, array $opt, callable $onChunk): void
+    /* ---------- 普通 HTTP 一律走 Guzzle ---------- */
+    public function request(string $method, string $uri, array $opt): array
     {
-        $json      = $opt['body'] ?? '';
+        return $this->fallback->request($method, $uri, $opt);
+    }
+
+    /* ---------- 流式 ---------- */
+    public function stream(string $method,string $url,array $opt,callable $onChunk): void
+    {
+        // 如果没有事件循环，直接 fallback
+        if (!class_exists(\Workerman\Worker::class, false)
+            || empty(\Workerman\Worker::getAllWorkers())) {
+            $this->fallback->stream($method,$url,$opt,$onChunk);
+            return;
+        }
+
+        /* -------------------- AsyncTcpConnection 实现 -------------------- */
+        $json      = $opt['body']    ?? '';
         $headers   = $opt['headers'] ?? [];
         $connectT  = $opt['connectTimeout'] ?? 10;
-        $idleT     = $opt['idleTimeout'] ?? 180;
+        $idleT     = $opt['idleTimeout']    ?? 180;
 
-        /* ---------- URL 解析 & TCP 地址 ---------- */
+        /* URL 解析 */
         $u    = parse_url($url);
         $ssl  = ($u['scheme'] ?? 'http') === 'https';
         $addr = 'tcp://' . $u['host'] . ':' . ($u['port'] ?? ($ssl ? 443 : 80));
         $path = ($u['path'] ?? '/') . (isset($u['query']) && $u['query'] !== '' ? '?' . $u['query'] : '');
 
-        /* ---------- HTTP 报文 ---------- */
+        /* 拼 HTTP 报文 */
         $req  = "POST $path HTTP/1.1\r\n";
         $req .= "Host: {$u['host']}\r\n";
         $req .= "Connection: keep-alive\r\n";
@@ -52,21 +68,20 @@ final class WorkermanTransport implements TransportInterface
         $req .= "Content-Length: " . strlen($json) . "\r\n\r\n";
         $req .= $json;
 
-        /* ---------- AsyncTcpConnection ---------- */
         $conn = new AsyncTcpConnection($addr);
         if ($ssl) $conn->transport = 'ssl';
         $conn->connectTimeout = $connectT;
 
-        /* idle 计时 —— 同 ai-sdk */
+        /* idle timer */
         $idleTimer = null;
         $touch = static function() use (&$idleTimer,$idleT,$conn){
             if($idleT<=0) return;
             $idleTimer && Timer::del($idleTimer);
-            $idleTimer = Timer::add($idleT, static fn()=> $conn->close(),[],false);
+            $idleTimer = Timer::add($idleT, static fn()=>$conn->close(),[],false);
         };
 
-        /* 逻辑同 ai-sdk 代码 */
-        $headerDone=false; $buf='';
+        /* 数据处理 */
+        $buf=''; $headerDone=false;
         $conn->onConnect = static function($c) use ($req,$touch){ $c->send($req); $touch(); };
         $conn->onMessage = static function($c,string $chunk) use (&$buf,&$headerDone,$onChunk,$touch)
         {
@@ -77,7 +92,7 @@ final class WorkermanTransport implements TransportInterface
             while(($n=strpos($buf,"\n"))!==false){
                 $line=trim(substr($buf,0,$n)); $buf=substr($buf,$n+1);
                 if($line===''||!str_starts_with($line,'data:')) continue;
-                $payload = trim(substr($line,5));
+                $payload=trim(substr($line,5));
                 $onChunk($payload==='[DONE]'?'':$payload,$payload==='[DONE]');
             }
         };
@@ -85,9 +100,12 @@ final class WorkermanTransport implements TransportInterface
             $idleTimer && Timer::del($idleTimer);
             $onChunk('',true);
         };
-        $conn->onClose=$end; $conn->onError=static fn()=>$end();
+        $conn->onClose = $end;
+        $conn->onError = static function() use ($end){ $end(); };
+
         $conn->connect();
 
+        /* 防 GC */
         static $pool=[]; $pool[spl_object_id($conn)]=$conn;
     }
 }
