@@ -1,4 +1,8 @@
-/.idea
-.idea/*
-/vendor
+# IDE
+.idea/
+
+# Composer 依赖（对子目录生效，不能写 /vendor）
+vendor/
+
+# 库代码不应提交 lock
 composer.lock
