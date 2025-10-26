@@ -8,25 +8,84 @@ use LayBot\Request\Exception\JsonException;
 use LayBot\Request\Support\Env;
 use LayBot\Request\Transport\GuzzleTransport;
 use LayBot\Request\Transport\WorkermanTransport;
+use LayBot\Request\Signer\{Hmac,Bearer,Basic,ApiKey,Inner,None};
 
 final class Client
 {
+    /* ===============================================================
+       0. 对外快捷入口
+    =============================================================== */
+    public static function make(array $opts): self
+    {
+        return new self($opts);               // 直接传数组
+    }
+
+    /* ===============================================================
+       1. 构造：既可传 Config，也可传数组
+    =============================================================== */
+    private Config $cfg;
     private TransportInterface $driver;
 
-    public function __construct(private Config $cfg)
+    public function __construct(Config|array $opts)
     {
+        $this->cfg    = is_array($opts) ? self::normalize($opts) : $opts;
         $this->driver = $this->pick();
     }
 
-    /* ---------- public 简易 API ---------- */
+    /* ===============================================================
+       2. 万能发送器 —— 三方 API 参数完全透传
+    =============================================================== */
+    public function send(
+        string  $method,
+        string  $path,
+        array   $opt         = [],
+        bool    $jsonDecode  = true
+    ) {
+        // 2-1 公共 header / 签名
+        $opt['headers'] = array_merge(
+            $opt['headers'] ?? [],
+            $this->cfg->headers,
+            $this->cfg->signer->sign(
+                $method,
+                $path,
+                $opt['body'] ?? ($opt['json'] ?? '')
+            )
+        );
+
+        // 2-2 默认超时
+        $opt['timeout'] ??= $this->cfg->timeout;
+
+        // 2-3 json => 自动编码到 body
+        if (isset($opt['json'])) {
+            $opt['body'] = json_encode($opt['json'], JSON_UNESCAPED_UNICODE);
+            unset($opt['json']);
+        }
+
+        // 2-4 真请求
+        $res = $this->driver->request($method, ltrim($path, '/'), $opt);
+
+        // 2-5 是否自动解析 JSON
+        if (!$jsonDecode) {
+            return $res['body'];
+        }
+        $arr = json_decode($res['body'], true);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            throw new JsonException('invalid json ' . $res['body'], $res['status'], $res['body']);
+        }
+        return $arr;
+    }
+
+    /* ===============================================================
+       3. 常用便捷方法（全部基于 send）
+    =============================================================== */
     public function get(string $path, array $query = [], array $hdr = []): array
     {
-        return $this->req('GET', $path, ['query' => $query, 'headers' => $hdr]);
+        return $this->send('GET', $path, ['query' => $query, 'headers' => $hdr]);
     }
 
     public function postJson(string $path, array $json = [], array $hdr = []): array
     {
-        return $this->req('POST', $path, ['json' => $json, 'headers' => $hdr]);
+        return $this->send('POST', $path, ['json' => $json, 'headers' => $hdr]);
     }
 
     public function upload(
@@ -34,28 +93,28 @@ final class Client
         string $field,
         string $file,
         array  $extra = [],
-        array  $hdr = []
+        array  $hdr   = []
     ): array {
-        $multi = [['name'      => $field,
-            'contents'  => fopen($file, 'r'),
-            'filename'  => basename($file)]];
+        $multi = [
+            ['name'     => $field,
+                'contents' => fopen($file, 'r'),
+                'filename' => basename($file)]
+        ];
         foreach ($extra as $k => $v) {
             $multi[] = ['name' => $k, 'contents' => $v];
         }
-        return $this->req('POST', $path, ['multipart' => $multi, 'headers' => $hdr]);
+        return $this->send('POST', $path, ['multipart' => $multi, 'headers' => $hdr]);
     }
 
-    /**
-     * 发起 SSE / ChatGPT 类流式请求
-     *
-     * @param array          $opt 可选 ['connect'=>10,'idle'=>180,'transport'=>'auto|guzzle|workerman']
-     */
+    /* ===============================================================
+       4. SSE / ChatGPT 流式
+    =============================================================== */
     public function stream(
         string   $path,
         array    $json,
         callable $cb,
         array    $hdr = [],
-        array    $opt = []
+        array    $opt = []    // ['connect'=>10,'idle'=>180,'transport'=>'auto|guzzle|workerman']
     ): void {
         $body = json_encode($json, JSON_UNESCAPED_UNICODE);
 
@@ -65,14 +124,11 @@ final class Client
             $this->cfg->signer->sign('POST', $path, $body)
         );
 
-        /* ---------- 运行时挑选流式 Driver ---------- */
-        $mode = $opt['transport']
-            ?? ($this->cfg->transport === 'workerman' ? 'workerman' : 'auto');
+        /* ---- 动态选流式驱动 ---- */
+        $mode   = $opt['transport'] ?? ($this->cfg->transport === 'workerman' ? 'workerman' : 'auto');
+        $driver = $this->driver;
 
-        $driver = $this->driver; // 默认 Guzzle
-
-        if ($mode === 'workerman'
-            || ($mode === 'auto' && Env::inWorkermanLoop())) {
+        if ($mode === 'workerman' || ($mode === 'auto' && Env::inWorkermanLoop())) {
             $driver = new WorkermanTransport(
                 $this->cfg->baseUri,
                 $this->cfg->timeout,
@@ -82,7 +138,6 @@ final class Client
             );
         }
 
-        /* ---------- 发起流式 ---------- */
         $driver->stream(
             'POST',
             ltrim($path, '/'),
@@ -96,37 +151,41 @@ final class Client
         );
     }
 
-    /* ---------- inner ---------- */
-    private function req(string $m, string $u, array $opt): array
+    /* ===============================================================
+       5. 把数组 opts => Config（Signer 自动推断）
+    =============================================================== */
+    private static function normalize(array $o): Config
     {
-        $body = $opt['json'] ?? ($opt['multipart'] ?? '');
-
-        if (isset($opt['json'])) {
-            $opt['body'] = json_encode($opt['json'], JSON_UNESCAPED_UNICODE);
-            unset($opt['json']);
+        if (empty($o['base_uri'])) {
+            throw new \InvalidArgumentException('base_uri required');
         }
 
-        $opt['timeout'] = $this->cfg->timeout;
-        $opt['headers'] = array_merge(
-            $opt['headers'] ?? [],
-            $this->cfg->headers,
-            $this->cfg->signer->sign($m, $u, is_string($body) ? $body : json_encode($body))
+        $signer = $o['signer'] ?? match (true) {
+            isset($o['api_key'],$o['api_secret'])          => new Hmac($o['api_key'],$o['api_secret']),
+            isset($o['token'])                             => new Bearer($o['token']),
+            isset($o['username'],$o['password'])           => new Basic($o['username'],$o['password']),
+            isset($o['inner_token'])                       => new Inner($o['inner_token']),
+            isset($o['api_key'])                           => new ApiKey($o['api_key'],$o['header']??'X-API-Key'),
+            default                                        => new None(),
+        };
+
+        return new Config(
+            baseUri   : $o['base_uri'],
+            headers   : $o['headers']   ?? [],
+            timeout   : $o['timeout']   ?? 10.0,
+            transport : $o['transport'] ?? 'auto',
+            retryTimes: $o['retry']     ?? 2,
+            verify    : $o['verify']    ?? false,
+            signer    : $signer,
+            logger    : $o['logger']    ?? null,
         );
-
-        $res = $this->driver->request($m, ltrim($u, '/'), $opt);
-        $arr = json_decode($res['body'], true);
-
-        if (json_last_error() !== JSON_ERROR_NONE) {
-            throw new JsonException('invalid json ' . $res['body'], $res['status'], $res['body']);
-        }
-
-        return $arr;
     }
 
-    /* ---------- 只决定“常规请求” Driver ---------- */
+    /* ===============================================================
+       6. Driver 选择（常规请求）
+    =============================================================== */
     private function pick(): TransportInterface
     {
-        // 手动强制 workerman：所有请求都走它
         if ($this->cfg->transport === 'workerman') {
             return new WorkermanTransport(
                 $this->cfg->baseUri,
@@ -136,8 +195,6 @@ final class Client
                 $this->cfg->logger
             );
         }
-
-        // 其余情况一律 Guzzle
         return new GuzzleTransport(
             $this->cfg->baseUri,
             $this->cfg->timeout,
