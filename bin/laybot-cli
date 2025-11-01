@@ -1,0 +1,4 @@
+# 生成 Key
+TOKEN=admin laybot-cli gen 1 "演示KEY"
+# 加密明文
+laybot-cli enc "sk-openai-secret"
