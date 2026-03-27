@@ -25,7 +25,7 @@
 
 `laybot/request-sdk` 的目标，就是把这些能力收敛成一个**可长期复用的基础网络组件库**，适合作为：
 
-- OpenAI Admin / Gemini Admin / Claude Admin 等管理类 SDK 的底层网络基座
+- OpenAI / Gemini /Claude 等管理类 SDK 的底层网络基座
 - Webman / Workerman 后台服务的通用 HTTP 组件
 - 内部 OpenAPI / 微服务调用工具
 - 定时同步、管理后台、Server-to-Server 通信基础库
@@ -82,7 +82,7 @@
 在实际项目中，建议按以下分层使用：
 
 - `request-sdk`：底层网络请求层
-- `openai_admin` / `gemini_admin`：平台管理接口层
+- `openai` / `gemini`：平台管理接口层
 - `laybot/ai-sdk`：大模型调用语义层
 - 业务项目：业务逻辑层
 
@@ -100,7 +100,7 @@ composer require laybot/request-sdk:^0.5
 
 适合：
 
-- OpenAI Admin / Gemini Admin / Claude Admin 等管理类 SDK 底座
+- 各类AI大模型 Admin 等管理类 SDK 底座
 - Webman / Workerman 后台服务
 - 定时同步任务
 - 管理后台
