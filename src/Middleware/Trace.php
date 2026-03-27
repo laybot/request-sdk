@@ -8,43 +8,74 @@ use Psr\Http\Message\RequestInterface;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Log\LoggerInterface;
 
-/**
- * 打印请求/响应链路日志（调试用）
- * – 兼容 ResponseInterface | array 两种返回值，避免类型冲突
- */
 final class Trace
 {
     public static function middleware(LoggerInterface $logger): callable
     {
         return static function (callable $handler) use ($logger): callable {
-            return static function (RequestInterface $req, array $opt) use ($handler, $logger): PromiseInterface {
+            return static function (RequestInterface $request, array $options) use ($handler, $logger): PromiseInterface {
                 $logger->debug('[HTTP] send', [
-                    'method'  => $req->getMethod(),
-                    'uri'     => (string)$req->getUri(),
-                    'headers' => $req->getHeaders(),
-                    'body'    => (string)$req->getBody(),
+                    'method' => $request->getMethod(),
+                    'uri' => (string)$request->getUri(),
+                    'headers' => self::maskHeaders($request->getHeaders()),
+                    'body' => self::limitBody((string)$request->getBody()),
                 ]);
 
-                return $handler($req, $opt)->then(
-                /** @param array|ResponseInterface $res */
-                    static function ($res) use ($req, $logger) {
-                        if ($res instanceof ResponseInterface) {
+                return $handler($request, $options)->then(
+                    static function ($response) use ($logger) {
+                        if ($response instanceof ResponseInterface) {
                             $logger->debug('[HTTP] recv', [
-                                'status'  => $res->getStatusCode(),
-                                'headers' => $res->getHeaders(),
-                                'body'    => (string)$res->getBody(),
+                                'status' => $response->getStatusCode(),
+                                'headers' => self::maskHeaders($response->getHeaders()),
+                                'body' => self::limitBody((string)$response->getBody()),
                             ]);
-                        } elseif (is_array($res)) {
-                            $logger->debug('[HTTP] recv', $res);
+                        } elseif (is_array($response)) {
+                            $logger->debug('[HTTP] recv', $response);
                         }
 
-                        return $res; // 继续传递
+                        return $response;
                     }
                 );
             };
         };
     }
 
-    // 禁止实例化
-    private function __construct() {}
+    private static function maskHeaders(array $headers): array
+    {
+        $masked = [];
+        $sensitive = [
+            'authorization',
+            'x-api-key',
+            'proxy-authorization',
+            'x-inner-token',
+        ];
+
+        foreach ($headers as $key => $value) {
+            $lower = strtolower((string)$key);
+            if (in_array($lower, $sensitive, true)) {
+                $masked[$key] = ['***'];
+                continue;
+            }
+            $masked[$key] = $value;
+        }
+
+        return $masked;
+    }
+
+    private static function limitBody(string $body, int $max = 2000): string
+    {
+        if ($max <= 0) {
+            return '';
+        }
+
+        if (strlen($body) <= $max) {
+            return $body;
+        }
+
+        return substr($body, 0, $max) . '...<truncated>';
+    }
+
+    private function __construct()
+    {
+    }
 }

@@ -9,93 +9,164 @@ use Psr\Log\LoggerInterface;
 use Workerman\Connection\AsyncTcpConnection;
 use Workerman\Timer;
 
-/**
- * Workerman/Webman 环境用真流式；否则回退 GuzzleTransport。
- */
 final class WorkermanTransport implements TransportInterface
 {
+    /**
+     * 持有活跃连接，避免被 GC 提前回收
+     * 必须在 onClose/onError 中及时释放，避免长驻进程内存泄漏
+     *
+     * @var array<int, AsyncTcpConnection>
+     */
+    private static array $pool = [];
+
     private GuzzleTransport $fallback;
 
     public function __construct(
-        string            $baseUri,
-        float             $timeout     = 10.0,
-        bool              $verify      = false,
-        int               $retryTimes  = 2,
-        ?LoggerInterface  $logger      = null
+        string $baseUri,
+        float $timeout = 10.0,
+        bool $verify = true,
+        int $retryTimes = 2,
+        ?LoggerInterface $logger = null
     ) {
-        $this->fallback = new GuzzleTransport($baseUri, $timeout, $verify, $retryTimes, $logger);
+        $this->fallback = new GuzzleTransport(
+            $baseUri,
+            $timeout,
+            $verify,
+            $retryTimes,
+            $logger
+        );
     }
 
-    /* 普通 HTTP */
-    public function request(string $method, string $uri, array $opt): array
+    public function request(string $method, string $uri, array $options): array
     {
-        return $this->fallback->request($method, $uri, $opt);
+        return $this->fallback->request($method, $uri, $options);
     }
 
-    /* 流式 HTTP */
-    public function stream(string $method, string $url, array $opt, callable $onChunk): void
+    public function stream(string $method, string $url, array $options, callable $onChunk): void
     {
         if (!Env::inWorkermanLoop()) {
-            $this->fallback->stream($method, $url, $opt, $onChunk);
+            $this->fallback->stream($method, $url, $options, $onChunk);
             return;
         }
 
-        /* === 以下同之前实现，保持不变 === */
-        $headers    = $opt['headers']        ?? [];
-        $body       = $opt['body']           ?? '';
-        $connectT   = $opt['connectTimeout'] ?? 10;
-        $idleT      = $opt['idleTimeout']    ?? 180;
+        $headers = $options['headers'] ?? [];
+        $body = (string)($options['body'] ?? '');
+        $connectTimeout = (float)($options['connectTimeout'] ?? 10);
+        $idleTimeout = (int)($options['idleTimeout'] ?? 180);
 
-        $p     = parse_url($url);
-        $ssl   = ($p['scheme'] ?? 'http') === 'https';
-        $addr  = 'tcp://' . $p['host'] . ':' . ($p['port'] ?? ($ssl ? 443 : 80));
-        $path  = ($p['path'] ?? '/') . (isset($p['query']) ? '?' . $p['query'] : '');
-
-        $req  = "$method $path HTTP/1.1\r\n";
-        $req .= "Host: {$p['host']}\r\nConnection: keep-alive\r\n";
-        foreach ($headers as $k => $v) {
-            $req .= (is_int($k) ? $v : "$k: $v") . "\r\n";
+        $parsed = parse_url($url);
+        if (!$parsed || empty($parsed['host'])) {
+            $this->fallback->stream($method, $url, $options, $onChunk);
+            return;
         }
-        $req .= "Content-Length: " . strlen($body) . "\r\n\r\n" . $body;
+
+        $scheme = $parsed['scheme'] ?? 'http';
+        $ssl = $scheme === 'https';
+        $host = $parsed['host'];
+        $port = $parsed['port'] ?? ($ssl ? 443 : 80);
+        $path = ($parsed['path'] ?? '/') . (isset($parsed['query']) ? '?' . $parsed['query'] : '');
+
+        $addr = 'tcp://' . $host . ':' . $port;
+
+        $request = strtoupper($method) . " {$path} HTTP/1.1\r\n";
+        $request .= "Host: {$host}\r\n";
+        $request .= "Connection: keep-alive\r\n";
+
+        foreach ($headers as $k => $v) {
+            if (is_array($v)) {
+                foreach ($v as $vv) {
+                    $request .= "{$k}: {$vv}\r\n";
+                }
+            } else {
+                $request .= "{$k}: {$v}\r\n";
+            }
+        }
+
+        $request .= 'Content-Length: ' . strlen($body) . "\r\n\r\n" . $body;
 
         $conn = new AsyncTcpConnection($addr);
-        if ($ssl) $conn->transport = 'ssl';
-        $conn->connectTimeout = $connectT;
+        if ($ssl) {
+            $conn->transport = 'ssl';
+        }
+        $conn->connectTimeout = $connectTimeout;
+
+        $connId = spl_object_id($conn);
+        self::$pool[$connId] = $conn;
 
         $idleTimer = null;
-        $touch = static function() use (&$idleTimer, $idleT, $conn) {
-            if ($idleT <= 0) return;
-            $idleTimer && Timer::del($idleTimer);
-            $idleTimer = Timer::add($idleT, static fn() => $conn->close(), [], false);
+        $touch = static function () use (&$idleTimer, $idleTimeout, $conn): void {
+            if ($idleTimeout <= 0) {
+                return;
+            }
+            if ($idleTimer !== null) {
+                Timer::del($idleTimer);
+            }
+            $idleTimer = Timer::add($idleTimeout, static function () use ($conn) {
+                $conn->close();
+            }, [], false);
         };
 
-        $buffer = '';  $headerDone = false;
-        $conn->onConnect = static function($c) use ($req, $touch) { $c->send($req); $touch(); };
-        $conn->onMessage = static function($c, string $chunk) use (&$buffer,&$headerDone,$onChunk,$touch) {
-            $touch();
-            $buffer .= $chunk;
-            if (!$headerDone && ($p = strpos($buffer, "\r\n\r\n")) !== false) {
-                $buffer = substr($buffer, $p + 4);
-                $headerDone = true;
-            }
-            while (($pos = strpos($buffer, "\n")) !== false) {
-                $line   = trim(substr($buffer, 0, $pos));
-                $buffer = substr($buffer, $pos + 1);
-                if ($line === '' || !str_starts_with($line, 'data:')) continue;
+        $buffer = '';
+        $headerDone = false;
+        $ended = false;
 
-                $payload = trim(substr($line, 5));
-                $finish  = $payload === '[DONE]';
-                $onChunk($finish ? '' : $payload, $finish);
+        $end = static function () use (&$idleTimer, &$ended, $onChunk, $connId): void {
+            if ($ended) {
+                return;
             }
-        };
-        $end = static function() use (&$idleTimer, $onChunk) {
-            $idleTimer && Timer::del($idleTimer);
+            $ended = true;
+
+            if ($idleTimer !== null) {
+                Timer::del($idleTimer);
+                $idleTimer = null;
+            }
+
+            unset(self::$pool[$connId]);
             $onChunk('', true);
         };
-        $conn->onClose = $end;
-        $conn->onError = static function() use ($end) { $end(); };
-        $conn->connect();
 
-        static $pool = []; $pool[spl_object_id($conn)] = $conn;
+        $conn->onConnect = static function ($connection) use ($request, $touch): void {
+            $connection->send($request);
+            $touch();
+        };
+
+        $conn->onMessage = static function ($connection, string $chunk) use (&$buffer, &$headerDone, $onChunk, $touch): void {
+            $touch();
+            $buffer .= $chunk;
+
+            if (!$headerDone) {
+                $pos = strpos($buffer, "\r\n\r\n");
+                if ($pos === false) {
+                    return;
+                }
+                $buffer = substr($buffer, $pos + 4);
+                $headerDone = true;
+            }
+
+            while (($pos = strpos($buffer, "\n")) !== false) {
+                $line = rtrim(substr($buffer, 0, $pos), "\r");
+                $buffer = substr($buffer, $pos + 1);
+
+                if ($line === '' || !str_starts_with($line, 'data:')) {
+                    continue;
+                }
+
+                $payload = trim(substr($line, 5));
+
+                if ($payload === '[DONE]') {
+                    $connection->close();
+                    return;
+                }
+
+                $onChunk($payload, false);
+            }
+        };
+
+        $conn->onClose = $end;
+        $conn->onError = static function () use ($end): void {
+            $end();
+        };
+
+        $conn->connect();
     }
 }

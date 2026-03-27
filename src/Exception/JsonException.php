@@ -1,11 +1,24 @@
 <?php
-// JsonException.php
+declare(strict_types=1);
+
 namespace LayBot\Request\Exception;
+
 class JsonException extends RequestException
 {
-    public function __construct(string $msg,int $code,string $raw){
-        parent::__construct($msg,$code);
-        $this->raw=$raw;
+    private string $raw;
+
+    public function __construct(
+        string $message,
+        int $code = 0,
+        string $raw = '',
+        ?\Throwable $previous = null
+    ) {
+        parent::__construct($message, $code, $previous);
+        $this->raw = $raw;
     }
-    public string $raw;
+
+    public function getRaw(): string
+    {
+        return $this->raw;
+    }
 }
