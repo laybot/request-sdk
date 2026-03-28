@@ -8,12 +8,23 @@ use Psr\Http\Message\StreamInterface;
 final class StreamDecoder
 {
     /**
-     * 按行解析 SSE data: 帧
+     * 基础流式解析器
+     *
+     * 支持模式：
+     * - data-line: 仅提取 data: 行（默认）
+     * - raw-line:  按行原样输出
      *
      * @param callable(string $chunk,bool $done):void $cb
+     * @param array{
+     *   mode?:string,
+     *   done_token?:?string
+     * } $opt
      */
-    public static function decode(StreamInterface $body, callable $cb): void
+    public static function decode(StreamInterface $body, callable $cb, array $opt = []): void
     {
+        $mode = strtolower(trim((string)($opt['mode'] ?? 'data-line')));
+        $doneToken = array_key_exists('done_token', $opt) ? $opt['done_token'] : '[DONE]';
+
         $buffer = '';
 
         while (!$body->eof()) {
@@ -23,14 +34,34 @@ final class StreamDecoder
                 $line = rtrim(substr($buffer, 0, $pos), "\r");
                 $buffer = substr($buffer, $pos + 1);
 
-                if (!str_starts_with($line, 'data:')) {
+                if ($mode === 'raw-line') {
+                    if ($line === '') {
+                        continue;
+                    }
+
+                    if ($doneToken !== null && $line === $doneToken) {
+                        $cb('', true);
+                        return;
+                    }
+
+                    $cb($line, false);
+                    continue;
+                }
+
+                // 默认 data-line
+                if ($line === '' || !str_starts_with($line, 'data:')) {
                     continue;
                 }
 
                 $payload = trim(substr($line, 5));
-                if ($payload === '[DONE]') {
+
+                if ($doneToken !== null && $payload === $doneToken) {
                     $cb('', true);
                     return;
+                }
+
+                if ($payload === '') {
+                    continue;
                 }
 
                 $cb($payload, false);

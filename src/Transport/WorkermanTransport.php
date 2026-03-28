@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace LayBot\Request\Transport;
 
 use LayBot\Request\Contract\TransportInterface;
+use LayBot\Request\Exception\StreamException;
 use LayBot\Request\Support\Env;
 use Psr\Log\LoggerInterface;
 use Workerman\Connection\AsyncTcpConnection;
@@ -13,13 +14,14 @@ final class WorkermanTransport implements TransportInterface
 {
     /**
      * 持有活跃连接，避免被 GC 提前回收
-     * 必须在 onClose/onError 中及时释放，避免长驻进程内存泄漏
      *
      * @var array<int, AsyncTcpConnection>
      */
     private static array $pool = [];
 
+    private string $baseUri;
     private GuzzleTransport $fallback;
+    private ?LoggerInterface $logger;
 
     public function __construct(
         string $baseUri,
@@ -28,6 +30,8 @@ final class WorkermanTransport implements TransportInterface
         int $retryTimes = 2,
         ?LoggerInterface $logger = null
     ) {
+        $this->baseUri = rtrim($baseUri, '/') . '/';
+        $this->logger = $logger;
         $this->fallback = new GuzzleTransport(
             $baseUri,
             $timeout,
@@ -42,10 +46,24 @@ final class WorkermanTransport implements TransportInterface
         return $this->fallback->request($method, $uri, $options);
     }
 
-    public function stream(string $method, string $url, array $options, callable $onChunk): void
+    public function stream(string $method, string $uri, array $options, callable $onChunk): void
     {
         if (!Env::inWorkermanLoop()) {
-            $this->fallback->stream($method, $url, $options, $onChunk);
+            $this->fallback->stream($method, $uri, $options, $onChunk);
+            return;
+        }
+
+        $decode = (array)($options['decode'] ?? []);
+        unset($options['decode']);
+
+        $mode = strtolower(trim((string)($decode['mode'] ?? 'data-line')));
+        $doneToken = array_key_exists('done_token', $decode) ? $decode['done_token'] : '[DONE]';
+
+        $url = $this->absoluteUrl($uri);
+        $parsed = parse_url($url);
+
+        if (!$parsed || empty($parsed['host'])) {
+            $this->fallback->stream($method, $uri, $options, $onChunk);
             return;
         }
 
@@ -54,23 +72,17 @@ final class WorkermanTransport implements TransportInterface
         $connectTimeout = (float)($options['connectTimeout'] ?? 10);
         $idleTimeout = (int)($options['idleTimeout'] ?? 180);
 
-        $parsed = parse_url($url);
-        if (!$parsed || empty($parsed['host'])) {
-            $this->fallback->stream($method, $url, $options, $onChunk);
-            return;
-        }
-
-        $scheme = $parsed['scheme'] ?? 'http';
+        $scheme = strtolower((string)($parsed['scheme'] ?? 'http'));
         $ssl = $scheme === 'https';
-        $host = $parsed['host'];
-        $port = $parsed['port'] ?? ($ssl ? 443 : 80);
+        $host = (string)$parsed['host'];
+        $port = (int)($parsed['port'] ?? ($ssl ? 443 : 80));
         $path = ($parsed['path'] ?? '/') . (isset($parsed['query']) ? '?' . $parsed['query'] : '');
 
         $addr = 'tcp://' . $host . ':' . $port;
 
         $request = strtoupper($method) . " {$path} HTTP/1.1\r\n";
         $request .= "Host: {$host}\r\n";
-        $request .= "Connection: keep-alive\r\n";
+        $request .= "Connection: close\r\n";
 
         foreach ($headers as $k => $v) {
             if (is_array($v)) {
@@ -82,7 +94,11 @@ final class WorkermanTransport implements TransportInterface
             }
         }
 
-        $request .= 'Content-Length: ' . strlen($body) . "\r\n\r\n" . $body;
+        if ($body !== '') {
+            $request .= 'Content-Length: ' . strlen($body) . "\r\n";
+        }
+
+        $request .= "\r\n" . $body;
 
         $conn = new AsyncTcpConnection($addr);
         if ($ssl) {
@@ -109,8 +125,11 @@ final class WorkermanTransport implements TransportInterface
         $buffer = '';
         $headerDone = false;
         $ended = false;
+        $statusChecked = false;
+        $statusCode = 0;
+        $rawHeader = '';
 
-        $end = static function () use (&$idleTimer, &$ended, $onChunk, $connId): void {
+        $end = function () use (&$idleTimer, &$ended, $onChunk, $connId): void {
             if ($ended) {
                 return;
             }
@@ -125,12 +144,70 @@ final class WorkermanTransport implements TransportInterface
             $onChunk('', true);
         };
 
+        $fail = function (string $message) use (&$idleTimer, &$ended, $connId): void {
+            if ($ended) {
+                return;
+            }
+            $ended = true;
+
+            if ($idleTimer !== null) {
+                Timer::del($idleTimer);
+                $idleTimer = null;
+            }
+
+            unset(self::$pool[$connId]);
+            throw new StreamException($message);
+        };
+
+        $emitLine = static function (string $line) use ($mode, $doneToken, $onChunk): void {
+            if ($mode === 'raw-line') {
+                if ($line === '') {
+                    return;
+                }
+
+                if ($doneToken !== null && $line === $doneToken) {
+                    $onChunk('', true);
+                    return;
+                }
+
+                $onChunk($line, false);
+                return;
+            }
+
+            if ($line === '' || !str_starts_with($line, 'data:')) {
+                return;
+            }
+
+            $payload = trim(substr($line, 5));
+
+            if ($doneToken !== null && $payload === $doneToken) {
+                $onChunk('', true);
+                return;
+            }
+
+            if ($payload === '') {
+                return;
+            }
+
+            $onChunk($payload, false);
+        };
+
         $conn->onConnect = static function ($connection) use ($request, $touch): void {
             $connection->send($request);
             $touch();
         };
 
-        $conn->onMessage = static function ($connection, string $chunk) use (&$buffer, &$headerDone, $onChunk, $touch): void {
+        $conn->onMessage = function ($connection, string $chunk) use (
+            &$buffer,
+            &$headerDone,
+            &$statusChecked,
+            &$statusCode,
+            &$rawHeader,
+            $emitLine,
+            $touch,
+            $fail,
+            $end
+        ): void {
             $touch();
             $buffer .= $chunk;
 
@@ -139,34 +216,73 @@ final class WorkermanTransport implements TransportInterface
                 if ($pos === false) {
                     return;
                 }
+
+                $rawHeader = substr($buffer, 0, $pos);
                 $buffer = substr($buffer, $pos + 4);
                 $headerDone = true;
+            }
+
+            if (!$statusChecked) {
+                $statusChecked = true;
+                $lines = explode("\r\n", $rawHeader);
+                $statusLine = $lines[0] ?? '';
+
+                if (!preg_match('#^HTTP/\d+\.\d+\s+(\d{3})#', $statusLine, $m)) {
+                    $fail('invalid stream response status line');
+                    return;
+                }
+
+                $statusCode = (int)$m[1];
+                if ($statusCode < 200 || $statusCode >= 300) {
+                    $fail('stream http ' . $statusCode);
+                    return;
+                }
             }
 
             while (($pos = strpos($buffer, "\n")) !== false) {
                 $line = rtrim(substr($buffer, 0, $pos), "\r");
                 $buffer = substr($buffer, $pos + 1);
 
-                if ($line === '' || !str_starts_with($line, 'data:')) {
+                if ($line === '') {
                     continue;
                 }
 
-                $payload = trim(substr($line, 5));
+                $beforeDone = $buffer;
+                $emitLine($line);
 
-                if ($payload === '[DONE]') {
-                    $connection->close();
-                    return;
+                // 若上面触发了 done，连接会在服务端关闭；这里不主动 close，避免回调重入
+                if ($beforeDone !== $buffer) {
+                    // no-op，仅保留结构一致性
                 }
-
-                $onChunk($payload, false);
             }
         };
 
-        $conn->onClose = $end;
-        $conn->onError = static function () use ($end): void {
+        $conn->onClose = static function () use ($end): void {
             $end();
         };
 
-        $conn->connect();
+        $conn->onError = static function ($connection, $code = 0, $msg = '') use ($fail): void {
+            $message = 'stream connection error';
+            if ($code || $msg !== '') {
+                $message .= " [{$code}] {$msg}";
+            }
+            $fail($message);
+        };
+
+        try {
+            $conn->connect();
+        } catch (\Throwable $e) {
+            unset(self::$pool[$connId]);
+            throw new StreamException('stream connect failed: ' . $e->getMessage(), 0, $e);
+        }
+    }
+
+    private function absoluteUrl(string $uri): string
+    {
+        if (preg_match('#^https?://#i', $uri)) {
+            return $uri;
+        }
+
+        return $this->baseUri . ltrim($uri, '/');
     }
 }

@@ -66,10 +66,13 @@ final class Config
         return $new;
     }
 
+    /**
+     * 追加/覆盖 headers，而不是整体替换
+     */
     public function withHeaders(array $headers): self
     {
         $new = clone $this;
-        $new->headers = $headers;
+        $new->headers = array_merge($this->headers, $headers);
         return $new;
     }
 

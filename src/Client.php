@@ -9,7 +9,6 @@ use LayBot\Request\Contract\TransportInterface;
 use LayBot\Request\Signer\ApiKeySigner;
 use LayBot\Request\Signer\BasicSigner;
 use LayBot\Request\Signer\BearerSigner;
-use LayBot\Request\Signer\HeaderSigner;
 use LayBot\Request\Signer\HmacSigner;
 use LayBot\Request\Signer\InnerSigner;
 use LayBot\Request\Signer\NoneSigner;
@@ -34,7 +33,7 @@ final class Client
     public function __construct(Config|array $opts)
     {
         $this->cfg = is_array($opts) ? self::normalize($opts) : $opts;
-        $this->driver = $this->pick();
+        $this->driver = $this->pickRequestDriver();
     }
 
     /**
@@ -51,6 +50,10 @@ final class Client
 
         if (!$jsonDecode) {
             return $res['body'];
+        }
+
+        if ($res['body'] === '') {
+            return [];
         }
 
         return Json::decode($res['body']);
@@ -139,9 +142,14 @@ final class Client
         ]);
     }
 
+    /**
+     * OPTIONS 更适合返回原始响应
+     *
+     * @return array{status:int,headers:array,body:string}
+     */
     public function options(string $path, array $query = [], array $hdr = []): array
     {
-        return $this->send('OPTIONS', $path, [
+        return $this->requestRaw('OPTIONS', $path, [
             'query' => $query,
             'headers' => $hdr,
         ]);
@@ -190,10 +198,20 @@ final class Client
             ];
         }
 
-        return $this->send('POST', $path, [
-            'multipart' => $multi,
-            'headers' => $hdr,
-        ]);
+        if (isset($hdr['Content-Type']) || isset($hdr['content-type'])) {
+            throw new InvalidArgumentException('do not set Content-Type manually when using multipart upload');
+        }
+
+        try {
+            return $this->send('POST', $path, [
+                'multipart' => $multi,
+                'headers' => $hdr,
+            ]);
+        } finally {
+            if (is_resource($fp)) {
+                fclose($fp);
+            }
+        }
     }
 
     /**
@@ -212,11 +230,24 @@ final class Client
             }
         }
 
-        $this->requestRaw('GET', $path, [
-            'query' => $query,
-            'headers' => $hdr,
-            'sink' => $saveTo,
-        ]);
+        $tmp = $saveTo . '.part';
+
+        try {
+            $this->requestRaw('GET', $path, [
+                'query' => $query,
+                'headers' => $hdr,
+                'sink' => $tmp,
+            ]);
+
+            if (!rename($tmp, $saveTo)) {
+                throw new InvalidArgumentException("move downloaded file failed: {$tmp} -> {$saveTo}");
+            }
+        } catch (\Throwable $e) {
+            if (is_file($tmp)) {
+                @unlink($tmp);
+            }
+            throw $e;
+        }
 
         $real = realpath($saveTo);
         if ($real === false) {
@@ -226,6 +257,22 @@ final class Client
         return $real;
     }
 
+    /**
+     * 基础流式请求
+     *
+     * 默认：
+     * - POST JSON
+     * - decode.mode = data-line
+     * - decode.done_token = [DONE]
+     *
+     * @param callable(string $chunk,bool $done):void $cb
+     * @param array{
+     *   transport?:string,
+     *   connect_timeout?:float|int,
+     *   idle_timeout?:int,
+     *   decode?:array{mode?:string,done_token?:?string}
+     * } $opt
+     */
     public function stream(
         string $path,
         array $json,
@@ -237,20 +284,12 @@ final class Client
 
         $headers = $this->buildHeaders('POST', $path, $body, $hdr);
         $headers['Content-Type'] ??= 'application/json';
+        $headers['Accept'] ??= 'text/event-stream';
+        $headers['Cache-Control'] ??= 'no-cache';
         $headers['User-Agent'] ??= $this->cfg->userAgent ?: UserAgent::default();
 
-        $mode = $opt['transport'] ?? ($this->cfg->transport === 'workerman' ? 'workerman' : 'auto');
-        $driver = $this->driver;
-
-        if ($mode === 'workerman' || ($mode === 'auto' && Env::inWorkermanLoop())) {
-            $driver = new WorkermanTransport(
-                $this->cfg->baseUri,
-                $this->cfg->timeout,
-                $this->cfg->verify,
-                $this->cfg->retryTimes,
-                $this->cfg->logger
-            );
-        }
+        $mode = self::normalizeTransport($opt['transport'] ?? $this->cfg->transport);
+        $driver = $this->pickStreamDriver($mode);
 
         $driver->stream(
             'POST',
@@ -258,8 +297,18 @@ final class Client
             [
                 'headers' => $headers,
                 'body' => $body,
-                'connectTimeout' => $opt['connect'] ?? $this->cfg->timeout,
-                'idleTimeout' => $opt['idle'] ?? 0,
+                'connectTimeout' => isset($opt['connect_timeout'])
+                    ? (float)$opt['connect_timeout']
+                    : $this->cfg->timeout,
+                'idleTimeout' => isset($opt['idle_timeout'])
+                    ? (int)$opt['idle_timeout']
+                    : 0,
+                'decode' => [
+                    'mode' => $opt['decode']['mode'] ?? 'data-line',
+                    'done_token' => array_key_exists('done_token', $opt['decode'] ?? [])
+                        ? $opt['decode']['done_token']
+                        : '[DONE]',
+                ],
             ],
             $cb
         );
@@ -269,7 +318,7 @@ final class Client
     {
         $new = clone $this;
         $new->cfg = $this->cfg->withSigner($signer);
-        $new->driver = $new->pick();
+        $new->driver = $new->pickRequestDriver();
         return $new;
     }
 
@@ -277,7 +326,7 @@ final class Client
     {
         $new = clone $this;
         $new->cfg = $this->cfg->withLogger($logger);
-        $new->driver = $new->pick();
+        $new->driver = $new->pickRequestDriver();
         return $new;
     }
 
@@ -285,7 +334,7 @@ final class Client
     {
         $new = clone $this;
         $new->cfg = $this->cfg->withRetry($times);
-        $new->driver = $new->pick();
+        $new->driver = $new->pickRequestDriver();
         return $new;
     }
 
@@ -293,7 +342,7 @@ final class Client
     {
         $new = clone $this;
         $new->cfg = $this->cfg->withHeaders($headers);
-        $new->driver = $new->pick();
+        $new->driver = $new->pickRequestDriver();
         return $new;
     }
 
@@ -301,7 +350,7 @@ final class Client
     {
         $new = clone $this;
         $new->cfg = $this->cfg->withTimeout($timeout);
-        $new->driver = $new->pick();
+        $new->driver = $new->pickRequestDriver();
         return $new;
     }
 
@@ -309,7 +358,7 @@ final class Client
     {
         $new = clone $this;
         $new->cfg = $this->cfg->withVerify($verify);
-        $new->driver = $new->pick();
+        $new->driver = $new->pickRequestDriver();
         return $new;
     }
 
@@ -317,7 +366,7 @@ final class Client
     {
         $new = clone $this;
         $new->cfg = $this->cfg->withUserAgent($userAgent);
-        $new->driver = $new->pick();
+        $new->driver = $new->pickRequestDriver();
         return $new;
     }
 
@@ -325,7 +374,7 @@ final class Client
     {
         $new = clone $this;
         $new->cfg = $this->cfg->withQueryArrayFormat($format);
-        $new->driver = $new->pick();
+        $new->driver = $new->pickRequestDriver();
         return $new;
     }
 
@@ -343,7 +392,7 @@ final class Client
         }
 
         if (array_key_exists('form_params', $opt)) {
-            $body = http_build_query($opt['form_params']);
+            $body = http_build_query($opt['form_params'], '', '&', PHP_QUERY_RFC3986);
             unset($opt['form_params']);
             $opt['body'] = $body;
             $opt['headers']['Content-Type'] ??= 'application/x-www-form-urlencoded';
@@ -367,7 +416,7 @@ final class Client
 
     private function buildHeaders(string $method, string $path, string $body, array $headers = []): array
     {
-        $merged = array_merge(
+        $merged = $this->mergeHeaders(
             $this->cfg->headers,
             $headers,
             $this->cfg->signer->sign($method, $path, $body)
@@ -376,6 +425,28 @@ final class Client
         $merged['User-Agent'] ??= $this->cfg->userAgent ?: UserAgent::default();
 
         return $merged;
+    }
+
+    private function mergeHeaders(array ...$groups): array
+    {
+        $result = [];
+        $nameMap = [];
+
+        foreach ($groups as $headers) {
+            foreach ($headers as $key => $value) {
+                $name = trim((string)$key);
+                if ($name === '') {
+                    continue;
+                }
+
+                $lower = strtolower($name);
+                $canonical = $nameMap[$lower] ?? $name;
+                $nameMap[$lower] = $canonical;
+                $result[$canonical] = $value;
+            }
+        }
+
+        return $result;
     }
 
     private function assertPayloadMode(array $opt): void
@@ -399,18 +470,12 @@ final class Client
             throw new InvalidArgumentException('base_uri required');
         }
 
-        /**
-         * 自动推断 signer 规则：
-         * 1. 若显式传 signer，则优先使用 signer
-         * 2. 否则按以下顺序自动推断：
-         *    custom_headers -> hmac -> bearer -> basic -> inner -> api_key -> none
-         *
-         * 注意：
-         * - token 仅表示 Bearer Token（Authorization: Bearer xxx）
-         * - custom_headers 表示任意静态自定义 Header
-         */
+        $headers = array_merge(
+            (array)($o['headers'] ?? []),
+            (array)($o['custom_headers'] ?? [])
+        );
+
         $signer = $o['signer'] ?? match (true) {
-            isset($o['custom_headers']) && is_array($o['custom_headers']) => new HeaderSigner((array)$o['custom_headers']),
             isset($o['api_key'], $o['api_secret']) => new HmacSigner((string)$o['api_key'], (string)$o['api_secret']),
             isset($o['token']) => new BearerSigner((string)$o['token']),
             isset($o['username'], $o['password']) => new BasicSigner((string)$o['username'], (string)$o['password']),
@@ -421,7 +486,7 @@ final class Client
 
         return new Config(
             baseUri: (string)$o['base_uri'],
-            headers: (array)($o['headers'] ?? []),
+            headers: $headers,
             timeout: self::toPositiveFloat($o['timeout'] ?? 10.0, 10.0),
             transport: self::normalizeTransport($o['transport'] ?? 'auto'),
             retryTimes: self::toNonNegativeInt($o['retry'] ?? 2, 2),
@@ -433,7 +498,7 @@ final class Client
         );
     }
 
-    private function pick(): TransportInterface
+    private function pickRequestDriver(): TransportInterface
     {
         if ($this->cfg->transport === 'workerman') {
             return new WorkermanTransport(
@@ -452,6 +517,41 @@ final class Client
             $this->cfg->retryTimes,
             $this->cfg->logger
         );
+    }
+
+    private function pickStreamDriver(string $mode): TransportInterface
+    {
+        return match ($mode) {
+            'guzzle' => new GuzzleTransport(
+                $this->cfg->baseUri,
+                $this->cfg->timeout,
+                $this->cfg->verify,
+                $this->cfg->retryTimes,
+                $this->cfg->logger
+            ),
+            'workerman' => new WorkermanTransport(
+                $this->cfg->baseUri,
+                $this->cfg->timeout,
+                $this->cfg->verify,
+                $this->cfg->retryTimes,
+                $this->cfg->logger
+            ),
+            default => Env::inWorkermanLoop()
+                ? new WorkermanTransport(
+                    $this->cfg->baseUri,
+                    $this->cfg->timeout,
+                    $this->cfg->verify,
+                    $this->cfg->retryTimes,
+                    $this->cfg->logger
+                )
+                : new GuzzleTransport(
+                    $this->cfg->baseUri,
+                    $this->cfg->timeout,
+                    $this->cfg->verify,
+                    $this->cfg->retryTimes,
+                    $this->cfg->logger
+                ),
+        };
     }
 
     private static function toBool(mixed $value, bool $default = true): bool

@@ -75,28 +75,50 @@ final class GuzzleTransport implements TransportInterface
 
     public function stream(string $method, string $uri, array $options, callable $onChunk): void
     {
+        $decode = (array)($options['decode'] ?? []);
+        unset($options['decode']);
+
         $options['stream'] = true;
+        $options['timeout'] ??= 0;
+
+        if (isset($options['connectTimeout'])) {
+            $options['connect_timeout'] = (float)$options['connectTimeout'];
+            unset($options['connectTimeout']);
+        }
 
         if (isset($options['idleTimeout']) && (int)$options['idleTimeout'] > 0) {
-            $options['curl'] = [
-                CURLOPT_LOW_SPEED_LIMIT => 1,
-                CURLOPT_LOW_SPEED_TIME => (int)$options['idleTimeout'],
-            ];
-            unset($options['idleTimeout']);
+            $options['curl'] = array_merge(
+                $options['curl'] ?? [],
+                [
+                    CURLOPT_LOW_SPEED_LIMIT => 1,
+                    CURLOPT_LOW_SPEED_TIME => (int)$options['idleTimeout'],
+                ]
+            );
         }
+        unset($options['idleTimeout']);
 
         /** @var ResponseInterface $res */
         $res = $this->cli->request(strtoupper($method), ltrim($uri, '/'), $options);
 
-        if ($res->getStatusCode() >= 400) {
-            throw new StreamException(
-                'stream http ' . $res->getStatusCode(),
-                $res->getStatusCode()
+        $status = $res->getStatusCode();
+        if ($status < 200 || $status >= 300) {
+            throw new HttpException(
+                message: sprintf('HTTP %d %s', $status, $uri),
+                statusCode: $status,
+                responseBody: (string)$res->getBody(),
+                responseHeaders: $res->getHeaders(),
+                method: strtoupper($method),
+                uri: $uri
             );
         }
 
         /** @var StreamInterface $body */
         $body = $res->getBody();
-        StreamDecoder::decode($body, $onChunk);
+
+        try {
+            StreamDecoder::decode($body, $onChunk, $decode);
+        } catch (\Throwable $e) {
+            throw new StreamException('stream decode failed: ' . $e->getMessage(), 0, $e);
+        }
     }
 }
