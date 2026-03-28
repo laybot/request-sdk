@@ -43,16 +43,9 @@ final class Trace
     private static function maskHeaders(array $headers): array
     {
         $masked = [];
-        $sensitive = [
-            'authorization',
-            'x-api-key',
-            'proxy-authorization',
-            'x-inner-token',
-        ];
 
         foreach ($headers as $key => $value) {
-            $lower = strtolower((string)$key);
-            if (in_array($lower, $sensitive, true)) {
+            if (self::isSensitiveHeader((string)$key)) {
                 $masked[$key] = ['***'];
                 continue;
             }
@@ -60,6 +53,36 @@ final class Trace
         }
 
         return $masked;
+    }
+
+    /**
+     * 规则型敏感头判断
+     *
+     * 原则：
+     * 1. 明确高风险头固定脱敏
+     * 2. 对包含 token/secret/key/sign 等关键词的 header 自动脱敏
+     * 3. 避免每新增一个 x-xxx-token 都要改 SDK
+     */
+    private static function isSensitiveHeader(string $headerName): bool
+    {
+        $name = strtolower(trim($headerName));
+        if ($name === '') {
+            return false;
+        }
+
+        // 明确高优先级敏感头
+        if (in_array($name, ['authorization', 'proxy-authorization'], true)) {
+            return true;
+        }
+
+        // 通用规则：包含这些关键词的 header 统一脱敏
+        foreach (['token', 'secret', 'key', 'signature', 'sign'] as $kw) {
+            if (str_contains($name, $kw)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static function limitBody(string $body, int $max = 2000): string

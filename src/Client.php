@@ -9,10 +9,10 @@ use LayBot\Request\Contract\TransportInterface;
 use LayBot\Request\Signer\ApiKeySigner;
 use LayBot\Request\Signer\BasicSigner;
 use LayBot\Request\Signer\BearerSigner;
+use LayBot\Request\Signer\HeaderSigner;
 use LayBot\Request\Signer\HmacSigner;
 use LayBot\Request\Signer\InnerSigner;
 use LayBot\Request\Signer\NoneSigner;
-use LayBot\Request\Signer\HeaderSigner;
 use LayBot\Request\Support\Env;
 use LayBot\Request\Support\Json;
 use LayBot\Request\Support\Query;
@@ -399,6 +399,16 @@ final class Client
             throw new InvalidArgumentException('base_uri required');
         }
 
+        /**
+         * 自动推断 signer 规则：
+         * 1. 若显式传 signer，则优先使用 signer
+         * 2. 否则按以下顺序自动推断：
+         *    custom_headers -> hmac -> bearer -> basic -> inner -> api_key -> none
+         *
+         * 注意：
+         * - token 仅表示 Bearer Token（Authorization: Bearer xxx）
+         * - custom_headers 表示任意静态自定义 Header
+         */
         $signer = $o['signer'] ?? match (true) {
             isset($o['custom_headers']) && is_array($o['custom_headers']) => new HeaderSigner((array)$o['custom_headers']),
             isset($o['api_key'], $o['api_secret']) => new HmacSigner((string)$o['api_key'], (string)$o['api_secret']),

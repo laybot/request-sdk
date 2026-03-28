@@ -23,6 +23,15 @@
   - 文件上传下载
   - 统一异常体系
 
+此外，Request-SDK 也支持通过 `custom_headers` 或 `HeaderSigner` 注入任意静态自定义请求头，适合：
+
+- 内部微服务固定 Header Token
+- 导出服务 Token
+- 平台间服务身份标识
+- 任意 `X-XXX-*` 风格静态 Header 鉴权
+
+这样既能保持 SDK 的统一调用方式，也避免每出现一种新 Header 鉴权就重复手写请求逻辑。
+
 `laybot/request-sdk` 的目标，就是把这些能力收敛成一个**可长期复用的基础网络组件库**，适合作为：
 
 - OpenAI / Gemini /Claude 等管理类 SDK 的底层网络基座
@@ -270,7 +279,7 @@ $http->stream('/v1/chat/completions', [
 | `password` | Basic 密码 | `null` |
 | `inner_token` | 内部服务 Token | `null` |
 | `logger` | PSR-3 Logger | `null` |
-
+| `custom_headers` | 自定义静态请求头（自动转 HeaderSigner） | `[]` |
 ---
 
 ## 8. 鉴权方式
@@ -330,6 +339,91 @@ $http = Client::make([
     'inner_token' => 'inner-token',
 ]);
 ```
+
+### 8.6 自定义 Header 鉴权
+
+适用于以下场景：
+
+- `X-Export-Token`
+- `X-Service-Token`
+- `X-Internal-App`
+- 其他任意静态 Header 鉴权
+
+```php
+$http = Client::make([
+    'base_uri' => 'https://api.example.com',
+    'custom_headers' => [
+        'X-Export-Token' => 'your-export-token',
+        'X-Service-Name' => 'paper-export',
+    ],
+]);
+```
+
+### 8.7 `token` 与 `custom_headers` 的区别
+
+`token` 是一个**语义化快捷配置**，专门表示 Bearer Token：
+
+```php
+$http = Client::make([
+    'base_uri' => 'https://api.example.com',
+    'token' => 'your-bearer-token',
+]);
+```
+
+等价于： Authorization: Bearer your-bearer-token
+
+而 custom_headers 表示任意静态自定义 Header，例如：
+```php
+$http = Client::make([
+    'base_uri' => 'https://api.example.com',
+    'custom_headers' => [
+        'X-Export-Token' => 'your-export-token',
+    ],
+]);
+```
+等价于： X-Export-Token: your-export-token
+
+### 8.8 多 token / 多 Header 共存
+
+在实际项目中，常见场景是：
+
+- 同时需要 `Authorization: Bearer xxx`
+- 又需要额外的 `X-Export-Token: yyy`
+- 或其他自定义服务身份 Header
+
+这种情况下，可以直接组合使用：
+
+```php
+$http = Client::make([
+    'base_uri' => 'https://api.example.com',
+    'token' => 'bearer-xxx',
+    'headers' => [
+        'X-Export-Token' => 'export-yyy',
+        'X-Service-Name' => 'paper-export',
+    ],
+]);
+```
+最终会同时携带：
+
+```php
+Authorization: Bearer bearer-xxx
+X-Export-Token: export-yyy
+X-Service-Name: paper-export
+
+```
+# 鉴权自动推断规则
+
+当未显式传入 `signer` 时，Client 会按以下顺序自动推断：
+
+1. `custom_headers` → `HeaderSigner`
+2. `api_key + api_secret` → `HmacSigner`
+3. `token` → `BearerSigner`
+4. `username + password` → `BasicSigner`
+5. `inner_token` → `InnerSigner`
+6. `api_key` → `ApiKeySigner`
+7. 默认 `NoneSigner`
+
+如果你希望完全控制行为，建议直接传入 `signer`。
 
 ---
 
@@ -460,6 +554,18 @@ JSON 编解码异常。
 
 > 生产环境建议谨慎开启 debug 级别 trace。
 
+Trace 中间件会自动对敏感 Header 做脱敏处理。
+
+当前脱敏规则包括：
+
+- 明确高风险头：`Authorization`、`Proxy-Authorization`
+- 以及 Header 名中包含以下关键词的请求头：
+  - `token`
+  - `secret`
+  - `key`
+  - `signature`
+  - `sign`
+
 ---
 
 ## 14. 设计说明
@@ -491,7 +597,7 @@ JSON 编解码异常。
 | Client | `Client` | 统一请求入口与便捷方法 |
 | Config | `Config` | 不可变配置对象 |
 | Transport | `GuzzleTransport` / `WorkermanTransport` | 普通请求与流式请求传输层 |
-| Signer | `BearerSigner` / `ApiKeySigner` / `BasicSigner` / `HmacSigner` / `InnerSigner` / `NoneSigner` | Header 鉴权插拔 |
+| Signer | `BearerSigner` / `ApiKeySigner` / `BasicSigner` / `HmacSigner` / `InnerSigner` / `HeaderSigner` / `NoneSigner` | Header 鉴权插拔 |
 | Middleware | `Retry` / `Trace` | 重试、追踪 |
 | Support | `Json` / `Query` / `UserAgent` / `Env` | JSON、Query、UA、环境辅助 |
 | Util | `StreamDecoder` | 解析 `text/event-stream` |
