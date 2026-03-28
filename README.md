@@ -1,45 +1,79 @@
 <h1 align="center">LayBot / Request-SDK · PHP</h1>
 <p align="center">
-  <b>通用 PHP HTTP 请求与 SSE 流式工具库</b><br>
-  <samp>稳定 · 易用 · 框架无关 · 适合作为第三方平台 SDK 底座</samp>
+  <b>通用 PHP HTTP 请求与基础流式工具库</b><br>
+  <samp>稳定 · 易用 · 框架无关 · 适合作为第三方平台 SDK 与企业项目的网络底座</samp>
 </p>
 
 ---
 
-## 1. 为什么选择 Request-SDK？
+## 1. 为什么使用 Request-SDK？
 
-在实际工程中，你既需要覆盖 **绝大多数普通 HTTP 请求场景**，  
-又希望在 Webman / Workerman 或其他PHP框架环境下，能够处理 **SSE 风格流式输出**。
+在实际工程里，服务端项目很少只面对一种请求场景。
 
-常见方案往往各有侧重：
+你既需要覆盖绝大多数普通 HTTP 请求，又经常会遇到下面这些现实问题：
 
-- **Guzzle**：功能成熟，适合普通同步 HTTP 请求；
-- **Workerman**：适合长连接与事件循环场景；
-- 但在真实项目里，你还会需要：
+- 接第三方 OpenAPI
+- 调内部微服务
+- 做管理后台与定时同步
+- 上传下载文件
+- 记录请求日志
+- 处理复杂鉴权
+- JSON 编解码
+- 重试机制
+- 统一异常体系
+- 在 Webman / Workerman 环境下接基础流式响应
+
+单独看，每一项都不复杂；但一旦落到真实项目里，问题往往不是“能不能发请求”，而是：
+
+- 请求方式是否统一
+- 鉴权逻辑是否可复用
+- JSON 编解码是否一致
+- 异常是否可控
+- 日志是否能脱敏
+- 文件下载是否会留下半文件
+- 流式请求在不同运行环境下是否还能保持一致调用方式
+
+常见方案各有侧重：
+
+- **Guzzle**：成熟稳定，适合普通同步 HTTP 请求
+- **Workerman**：适合事件循环和长连接场景
+- 但在项目里，通常还需要把这些能力统一起来：
   - Header 鉴权
   - JSON 编解码
-  - 重试机制
+  - Retry
   - Trace 日志
   - 文件上传下载
+  - 基础流式处理
   - 统一异常体系
 
-此外，Request-SDK 也支持通过 `custom_headers` 或 `HeaderSigner` 注入任意静态自定义请求头，适合：
+此外，很多服务并不是标准 Bearer 或 Basic 鉴权，而是固定 Header Token，例如：
 
 - 内部微服务固定 Header Token
 - 导出服务 Token
 - 平台间服务身份标识
 - 任意 `X-XXX-*` 风格静态 Header 鉴权
 
-这样既能保持 SDK 的统一调用方式，也避免每出现一种新 Header 鉴权就重复手写请求逻辑。
+`laybot/request-sdk` 的目的，就是把这些网络层能力收敛成一个**可长期复用的基础组件库**，适合作为：
 
-`laybot/request-sdk` 的目标，就是把这些能力收敛成一个**可长期复用的基础网络组件库**，适合作为：
-
-- OpenAI / Gemini /Claude 等管理类 SDK 的底层网络基座
+- OpenAI / Gemini / Claude 等管理类 SDK 的底层网络基座
 - Webman / Workerman 后台服务的通用 HTTP 组件
 - 内部 OpenAPI / 微服务调用工具
 - 定时同步、管理后台、Server-to-Server 通信基础库
 
-> 目标：成为一套在 PHP 大型项目中“趁手、稳定、可复用”的网络请求底座。
+`laybot/request-sdk` 的目标不是替代业务 SDK，也不负责模型语义封装。它只解决一件事：**把请求稳定地发出去，把响应按统一方式收回来**。
+
+适用场景包括：
+
+- 内部微服务调用
+- 第三方 OpenAPI 接入
+- 管理后台服务端请求
+- 定时任务与数据同步
+- 文件上传下载
+- 基础流式响应处理
+- 作为上层 SDK 的网络底座
+
+如果你的目标是做大模型对话、流式增量聚合、厂商协议适配，请使用上层 `laybot/ai-sdk`。  
+`request-sdk` 只负责网络层，不负责模型语义层。
 
 ---
 
@@ -58,7 +92,8 @@
 - Bearer / ApiKey / Basic / Hmac / Inner 鉴权
 - Retry / Trace / Timeout
 - 原始响应获取
-- SSE 风格基础流式请求
+- 基础流式请求
+- Query 编码控制
 
 本库**不负责**：
 
@@ -91,9 +126,15 @@
 在实际项目中，建议按以下分层使用：
 
 - `request-sdk`：底层网络请求层
-- `openai` / `gemini`：平台管理接口层
+- `openai` / `gemini` / 其他平台管理 SDK：平台接口层
 - `laybot/ai-sdk`：大模型调用语义层
 - 业务项目：业务逻辑层
+
+这样做的好处是：
+
+- 网络层能力统一
+- 鉴权、重试、日志、下载等能力不重复实现
+- 上层 SDK 只关心业务语义，不重复处理底层传输细节
 
 ---
 
@@ -109,20 +150,23 @@ composer require laybot/request-sdk:^0.5
 
 适合：
 
-- 各类AI大模型 Admin 等管理类 SDK 底座
+- 各类 AI 平台管理类 SDK 底座
 - Webman / Workerman 后台服务
 - 定时同步任务
 - 管理后台
 - 内部 OpenAPI / 微服务调用
 - 文件上传下载
-- SSE 基础流式请求
-- 其他企业级server-to-server网络请求
+- 基础流式请求
+- 其他企业级 server-to-server 网络请求
+
 不直接面向：
 
 - 大模型对话语义封装
 - Chat / Embedding / Tool Calls 等模型调用层
+- 厂商流式协议适配与消息聚合
 
-普通请求默认使用 Guzzle，同步稳定优先；流式请求在 Workerman 事件循环中可启用 WorkermanTransport。
+普通请求默认使用 Guzzle，稳定优先。  
+流式请求支持 Guzzle 与 Workerman 两种 transport，适合在不同运行环境下统一调用方式。
 
 ---
 
@@ -188,7 +232,31 @@ $raw = $http->requestRaw('GET', '/get', [
 
 ---
 
-### 6.5 Bearer 鉴权
+### 6.5 获取 JSON（mixed）
+
+对于底层网络场景，有些接口返回的 JSON 不一定是对象，也可能是：
+
+- 数组
+- 字符串
+- 数字
+- 布尔值
+- null
+
+可以使用：
+
+```php
+$res = $http->requestJsonAny('GET', '/anything');
+```
+
+或者：
+
+```php
+$res = $http->getAny('/anything');
+```
+
+---
+
+### 6.6 Bearer 鉴权
 
 ```php
 $http = Client::make([
@@ -202,7 +270,7 @@ $http = Client::make([
 
 ---
 
-### 6.6 文件上传
+### 6.7 文件上传
 
 ```php
 $res = $http->upload(
@@ -215,7 +283,7 @@ $res = $http->upload(
 
 ---
 
-### 6.7 文件下载
+### 6.8 文件下载
 
 ```php
 $path = $http->download(
@@ -226,11 +294,11 @@ $path = $http->download(
 echo $path;
 ```
 
-> `download()` 使用流式写入，不会将整个响应体一次性读入内存。
+> `download()` 使用临时文件写入，成功后再原子替换目标文件，适合大文件下载场景。
 
 ---
 
-### 6.8 SSE 风格流式请求
+### 6.9 基础流式请求
 
 ```php
 $http = Client::make([
@@ -255,8 +323,8 @@ $http->stream('/v1/chat/completions', [
 });
 ```
 
-> 当前 `stream()` 主要面向 **SSE / `data:` 行流** 场景。  
-> 若要进行完整的大模型对话封装，请使用 `laybot-ai-sdk`。
+> `stream()` 面向基础流式场景，默认适合 `data:` 行流。  
+> 若要进行完整的大模型流式协议处理，请使用 `laybot/ai-sdk`。
 
 ---
 
@@ -266,6 +334,7 @@ $http->stream('/v1/chat/completions', [
 |---|---|---|
 | `base_uri` | 基础地址，必填 | - |
 | `headers` | 默认请求头 | `[]` |
+| `custom_headers` | 附加静态请求头 | `[]` |
 | `timeout` | 请求超时（秒） | `10.0` |
 | `transport` | `auto` / `guzzle` / `workerman` | `auto` |
 | `retry` | 重试次数 | `2` |
@@ -279,7 +348,8 @@ $http->stream('/v1/chat/completions', [
 | `password` | Basic 密码 | `null` |
 | `inner_token` | 内部服务 Token | `null` |
 | `logger` | PSR-3 Logger | `null` |
-| `custom_headers` | 自定义静态请求头（自动转 HeaderSigner） | `[]` |
+| `signer` | 自定义 signer | `null` |
+
 ---
 
 ## 8. 鉴权方式
@@ -291,6 +361,12 @@ $http = Client::make([
     'base_uri' => 'https://api.example.com',
     'token' => 'your-token',
 ]);
+```
+
+等价于：
+
+```http
+Authorization: Bearer your-token
 ```
 
 ---
@@ -340,14 +416,16 @@ $http = Client::make([
 ]);
 ```
 
-### 8.6 自定义 Header 鉴权
+---
+
+### 8.6 自定义静态 Header
 
 适用于以下场景：
 
 - `X-Export-Token`
 - `X-Service-Token`
 - `X-Internal-App`
-- 其他任意静态 Header 鉴权
+- 其他任意固定 Header 标识
 
 ```php
 $http = Client::make([
@@ -359,9 +437,11 @@ $http = Client::make([
 ]);
 ```
 
+---
+
 ### 8.7 `token` 与 `custom_headers` 的区别
 
-`token` 是一个**语义化快捷配置**，专门表示 Bearer Token：
+`token` 是语义化快捷配置，专门表示 Bearer Token：
 
 ```php
 $http = Client::make([
@@ -370,9 +450,14 @@ $http = Client::make([
 ]);
 ```
 
-等价于： Authorization: Bearer your-bearer-token
+等价于：
 
-而 custom_headers 表示任意静态自定义 Header，例如：
+```http
+Authorization: Bearer your-bearer-token
+```
+
+而 `custom_headers` 表示任意附加静态请求头，例如：
+
 ```php
 $http = Client::make([
     'base_uri' => 'https://api.example.com',
@@ -381,7 +466,14 @@ $http = Client::make([
     ],
 ]);
 ```
-等价于： X-Export-Token: your-export-token
+
+等价于：
+
+```http
+X-Export-Token: your-export-token
+```
+
+---
 
 ### 8.8 多 token / 多 Header 共存
 
@@ -397,31 +489,35 @@ $http = Client::make([
 $http = Client::make([
     'base_uri' => 'https://api.example.com',
     'token' => 'bearer-xxx',
-    'headers' => [
+    'custom_headers' => [
         'X-Export-Token' => 'export-yyy',
         'X-Service-Name' => 'paper-export',
     ],
 ]);
 ```
+
 最终会同时携带：
 
-```php
+```http
 Authorization: Bearer bearer-xxx
 X-Export-Token: export-yyy
 X-Service-Name: paper-export
-
 ```
-# 鉴权自动推断规则
+
+---
+
+### 8.9 鉴权自动推断规则
 
 当未显式传入 `signer` 时，Client 会按以下顺序自动推断：
 
-1. `custom_headers` → `HeaderSigner`
-2. `api_key + api_secret` → `HmacSigner`
-3. `token` → `BearerSigner`
-4. `username + password` → `BasicSigner`
-5. `inner_token` → `InnerSigner`
-6. `api_key` → `ApiKeySigner`
-7. 默认 `NoneSigner`
+1. `api_key + api_secret` → `HmacSigner`
+2. `token` → `BearerSigner`
+3. `username + password` → `BasicSigner`
+4. `inner_token` → `InnerSigner`
+5. `api_key` → `ApiKeySigner`
+6. 默认 `NoneSigner`
+
+`custom_headers` 只作为附加请求头，不参与 signer 推断。
 
 如果你希望完全控制行为，建议直接传入 `signer`。
 
@@ -429,16 +525,22 @@ X-Service-Name: paper-export
 
 ## 9. Query 数组格式
 
-支持两种 query 数组编码方式：
+支持两种 query 数组编码方式。
 
 ### 9.1 brackets（默认）
 
-适合常规 Guzzle 数组 query：
+适合常规数组 query：
 
 ```php
 [
-  'group_by' => ['project_id', 'line_item']
+    'group_by' => ['project_id', 'line_item']
 ]
+```
+
+编码后类似：
+
+```txt
+group_by[0]=project_id&group_by[1]=line_item
 ```
 
 ---
@@ -475,7 +577,10 @@ $http2 = $http
     ->withTimeout(30)
     ->withRetry(3)
     ->withVerify(true)
-    ->withUserAgent('AI-Admin-Client/1.0');
+    ->withUserAgent('AI-Admin-Client/1.0')
+    ->withHeaders([
+        'X-App-Name' => 'admin-service',
+    ]);
 ```
 
 支持：
@@ -489,53 +594,281 @@ $http2 = $http
 - `withUserAgent()`
 - `withQueryArrayFormat()`
 
+这些方法返回的是新的 `Client` 实例，不会修改原对象。  
+适合在常驻进程和并发场景中复用。
+
 ---
 
-## 11. 便捷方法总览
+## 11. 方法总览
+
+### 11.1 返回 JSON array 的方法
+
+这些方法默认要求响应 JSON 解码结果为数组：
 
 | 方法 | 说明 |
 |---|---|
-| `get()` | GET 请求 |
+| `send()` | 通用请求，JSON 解码为 array |
+| `requestJsonArray()` | 通用请求，JSON 解码为 array |
+| `get()` | GET |
 | `postJson()` | POST JSON |
-| `postForm()` | POST 表单 |
-| `post()` | POST 原始 body 或表单 |
-| `put()` | PUT |
-| `patch()` | PATCH |
+| `postForm()` | POST Form |
+| `post()` | POST，数组默认按 Form 发送 |
+| `put()` | PUT，数组默认按 JSON 发送 |
+| `patch()` | PATCH，数组默认按 JSON 发送 |
 | `delete()` | DELETE |
-| `head()` | HEAD，返回原始响应 |
-| `options()` | OPTIONS |
-| `upload()` | 文件上传 |
-| `download()` | 流式下载到本地 |
+
+---
+
+### 11.2 返回 JSON mixed 的方法
+
+这些方法适合底层通用场景：
+
+| 方法 | 说明 |
+|---|---|
+| `sendAny()` | 通用请求，JSON 解码为 mixed |
+| `requestJsonAny()` | 通用请求，JSON 解码为 mixed |
+| `getAny()` | GET |
+| `postJsonAny()` | POST JSON |
+| `postFormAny()` | POST Form |
+| `postAny()` | POST |
+| `putAny()` | PUT |
+| `patchAny()` | PATCH |
+| `deleteAny()` | DELETE |
+
+---
+
+### 11.3 原始响应方法
+
+| 方法 | 说明 |
+|---|---|
 | `requestRaw()` | 获取原始响应 |
-| `stream()` | SSE 风格流式请求 |
+| `head()` | HEAD，返回原始响应 |
+| `options()` | OPTIONS，返回原始响应 |
 
 ---
 
-## 12. 异常说明
+### 11.4 文件与流式方法
 
-### `LayBot\Request\Exception\RequestException`
-基础请求异常。
-
-### `LayBot\Request\Exception\HttpException`
-HTTP 非 2xx 响应异常，可获取：
-
-- `getStatusCode()`
-- `getResponseBody()`
-- `getResponseHeaders()`
-- `getMethod()`
-- `getUri()`
-
-### `LayBot\Request\Exception\JsonException`
-JSON 编解码异常。
-
-### `LayBot\Request\Exception\StreamException`
-流式请求异常。
+| 方法 | 说明 |
+|---|---|
+| `upload()` | 文件上传 |
+| `download()` | 下载到本地文件 |
+| `stream()` | 基础流式请求 |
 
 ---
 
-## 13. Retry 与 Trace
+## 12. 关于 `post()` / `put()` / `patch()` 的数组行为
 
-### Retry
+为了兼顾常见使用习惯，这几个方法对数组参数的处理规则不同：
+
+- `post(array)`：按 `form_params` 发送
+- `put(array)`：按 `json` 发送
+- `patch(array)`：按 `json` 发送
+
+如果你需要明确语义，建议优先使用：
+
+- `postJson()`
+- `postForm()`
+- `postJsonAny()`
+- `postFormAny()`
+
+---
+
+## 13. 文件上传与下载
+
+### 13.1 文件上传
+
+```php
+$res = $http->upload(
+    '/upload',
+    'file',
+    __DIR__ . '/demo.txt',
+    ['scene' => 'test']
+);
+```
+
+说明：
+
+- 上传时不要手动设置 `Content-Type`
+- `multipart boundary` 由底层 HTTP 客户端自动处理
+- 上传结束后文件句柄会自动释放
+
+---
+
+### 13.2 文件下载
+
+```php
+$path = $http->download(
+    '/image/png',
+    __DIR__ . '/runtime/demo.png'
+);
+
+echo $path;
+```
+
+说明：
+
+- 下载使用临时文件写入，成功后再原子替换目标文件
+- 失败时会清理 `.part` 临时文件
+- 适合大文件下载场景
+
+---
+
+## 14. 流式请求
+
+### 14.1 最简单的用法
+
+```php
+$http = Client::make([
+    'base_uri' => 'https://api.example.com',
+    'token' => 'sk-xxx',
+]);
+
+$http->stream('/v1/stream', [
+    'stream' => true,
+    'input' => 'hello',
+], function (string $chunk, bool $done) {
+    if ($done) {
+        echo PHP_EOL . '[DONE]' . PHP_EOL;
+        return;
+    }
+
+    echo $chunk . PHP_EOL;
+});
+```
+
+---
+
+### 14.2 指定 Guzzle 作为流式传输层
+
+```php
+$http->stream('/v1/stream', [
+    'stream' => true,
+], function (string $chunk, bool $done) {
+    // ...
+}, [], [
+    'transport' => 'guzzle',
+]);
+```
+
+对于关键业务链路，建议优先使用 `guzzle`。
+
+---
+
+### 14.3 指定 Workerman 作为流式传输层
+
+```php
+$http->stream('/v1/stream', [
+    'stream' => true,
+], function (string $chunk, bool $done) {
+    // ...
+}, [], [
+    'transport' => 'workerman',
+]);
+```
+
+说明：
+
+- 仅适合事件循环环境
+- 适合简单文本流场景
+- 遇到复杂响应头时会自动回退到 Guzzle
+
+---
+
+### 14.4 流式解析模式
+
+#### `data-line`（默认）
+
+只提取以 `data:` 开头的行，适合常见 SSE 风格接口。
+
+```php
+$http->stream('/v1/stream', $payload, $cb, [], [
+    'decode' => [
+        'mode' => 'data-line',
+    ],
+]);
+```
+
+---
+
+#### `raw-line`
+
+按行返回原始文本，不要求必须是 `data:` 行。
+
+```php
+$http->stream('/v1/stream', $payload, $cb, [], [
+    'decode' => [
+        'mode' => 'raw-line',
+    ],
+]);
+```
+
+---
+
+### 14.5 自定义结束标记
+
+默认结束标记为 `[DONE]`。
+
+```php
+$http->stream('/v1/stream', $payload, $cb, [], [
+    'decode' => [
+        'done_token' => '[END]',
+    ],
+]);
+```
+
+如果不希望底层识别结束标记，可以传 `null`：
+
+```php
+$http->stream('/v1/stream', $payload, $cb, [], [
+    'decode' => [
+        'done_token' => null,
+    ],
+]);
+```
+
+---
+
+### 14.6 流式超时控制
+
+```php
+$http->stream('/v1/stream', $payload, $cb, [], [
+    'connect_timeout' => 10,
+    'idle_timeout' => 120,
+]);
+```
+
+说明：
+
+- `connect_timeout`：建立连接超时
+- `idle_timeout`：流式过程中连续静默超时，`0` 表示不限制
+
+---
+
+### 14.7 关于流式能力的边界
+
+`stream()` 提供的是基础流式能力，适合：
+
+- `text/event-stream`
+- `data:` 行流
+- 文本行流
+- 基础 JSON 行流
+
+它不负责：
+
+- 厂商流式协议适配
+- 增量消息聚合
+- 对话消息拼装
+- 模型层结束语义处理
+
+如果你的目标是做大模型流式对话，请在上层 SDK 中处理协议语义，而不是把这些逻辑放在 `request-sdk` 中。
+
+---
+
+## 15. Retry 与 Trace
+
+### 15.1 Retry
+
 默认支持：
 
 - 网络异常重试
@@ -544,15 +877,27 @@ JSON 编解码异常。
 - 指数退避 + 抖动
 - `Retry-After` 识别
 
-### Trace
-如果传入 logger，会记录请求/响应调试日志，并自动脱敏：
+配置示例：
 
-- `Authorization`
-- `X-API-Key`
-- `X-Inner-Token`
-- `Proxy-Authorization`
+```php
+$http = Client::make([
+    'base_uri' => 'https://api.example.com',
+    'retry' => 3,
+]);
+```
 
-> 生产环境建议谨慎开启 debug 级别 trace。
+---
+
+### 15.2 Trace
+
+如果传入 PSR-3 Logger，会记录请求与响应调试日志。
+
+```php
+$http = Client::make([
+    'base_uri' => 'https://api.example.com',
+    'logger' => $logger,
+]);
+```
 
 Trace 中间件会自动对敏感 Header 做脱敏处理。
 
@@ -566,21 +911,64 @@ Trace 中间件会自动对敏感 Header 做脱敏处理。
   - `signature`
   - `sign`
 
+此外：
+
+- 文本类型 body 会按长度截断记录
+- 二进制 body 不直接写日志
+
+> 生产环境建议谨慎开启 debug 级别 trace。
+
 ---
 
-## 14. 设计说明
+## 16. 异常说明
 
-### 普通请求
+### `LayBot\Request\Exception\RequestException`
+
+基础请求异常。
+
+### `LayBot\Request\Exception\HttpException`
+
+HTTP 非 2xx 响应异常，可获取：
+
+- `getStatusCode()`
+- `getResponseBody()`
+- `getResponseHeaders()`
+- `getMethod()`
+- `getUri()`
+
+### `LayBot\Request\Exception\JsonException`
+
+JSON 编解码异常。
+
+### `LayBot\Request\Exception\StreamException`
+
+流式请求异常。
+
+---
+
+## 17. 设计说明
+
+### 17.1 普通请求
+
 普通请求默认走 Guzzle，稳定优先。
 
-### 流式请求
-`stream()` 在 Workerman/Webman 事件循环中可启用 `WorkermanTransport`。  
-当前主要支持 **SSE / `data:` 行流**。
+### 17.2 流式请求
 
-### 下载
-`download()` 使用 `sink` 流式写入文件，适合大文件下载场景。
+流式请求支持 Guzzle 与 Workerman 两种 transport。
 
-### 参数约束
+其中：
+
+- `guzzle` 适合作为默认和主力方案
+- `workerman` 适合事件循环环境下的简单文本流场景
+
+当检测到复杂响应头时，Workerman transport 会优先回退到 Guzzle 处理。
+
+### 17.3 下载
+
+`download()` 使用临时文件写入并原子替换目标文件，适合大文件下载场景。
+
+### 17.4 参数约束
+
 同一次请求中，以下 payload 模式只能使用一种：
 
 - `json`
@@ -590,22 +978,53 @@ Trace 中间件会自动对敏感 Header 做脱敏处理。
 
 ---
 
-## 15. 模块总览
+## 18. 模块总览
 
 | 模块 | 组件 | 作用 |
 |------|------|------|
 | Client | `Client` | 统一请求入口与便捷方法 |
 | Config | `Config` | 不可变配置对象 |
 | Transport | `GuzzleTransport` / `WorkermanTransport` | 普通请求与流式请求传输层 |
-| Signer | `BearerSigner` / `ApiKeySigner` / `BasicSigner` / `HmacSigner` / `InnerSigner` / `HeaderSigner` / `NoneSigner` | Header 鉴权插拔 |
+| Signer | `BearerSigner` / `ApiKeySigner` / `BasicSigner` / `HmacSigner` / `InnerSigner` / `NoneSigner` | 鉴权插拔 |
 | Middleware | `Retry` / `Trace` | 重试、追踪 |
 | Support | `Json` / `Query` / `UserAgent` / `Env` | JSON、Query、UA、环境辅助 |
-| Util | `StreamDecoder` | 解析 `text/event-stream` |
-| Facade | `PartnerApi` / `InnerApi` | 官方快捷调用封装 |
+| Util | `StreamDecoder` | 基础流式解码 |
+| Facade | `PartnerApi` / `InnerApi` | 固定场景快捷封装 |
 
 ---
 
-## 16. 版本建议
+## 19. 与 `laybot/ai-sdk` 的关系
+
+建议按以下方式分层：
+
+- `laybot/request-sdk`：网络层
+- `laybot/ai-sdk`：模型语义层
+- 业务项目：业务逻辑层
+
+职责划分如下：
+
+### `request-sdk` 负责
+
+- HTTP 请求
+- 鉴权
+- Retry / Trace / Timeout
+- 上传下载
+- 原始响应
+- 基础流式传输
+
+### `ai-sdk` 负责
+
+- 模型厂商协议适配
+- Chat / Embedding / Image / Audio 等语义封装
+- 流式增量 JSON 解析
+- `[DONE]` / `finish_reason` / 厂商结束语义
+- 对话消息聚合
+
+这样可以避免网络层和模型语义层相互耦合。
+
+---
+
+## 20. 版本建议
 
 当前建议版本：
 
@@ -613,24 +1032,24 @@ Trace 中间件会自动对敏感 Header 做脱敏处理。
 0.5.x
 ```
 
-如果你在大型项目中使用，建议固定小版本范围并做好 smoke test。
+如果你在大型项目中使用，建议固定小版本范围，并在升级前做一次最小回归验证。
 
 ---
 
-## 17. 关于 LayBot
+## 21. 关于 LayBot
 
 **LayBot · 灵语智教** 专注教育与知识管理的 AIGC 平台，  
 拥有自研大模型、矢量检索、知识图谱等核心能力，并陆续开源 **LayBot 系列 SDK**：
 
-- `laybot-ai-sdk`：大模型调用语义层 SDK
+- `laybot/ai-sdk`：大模型调用语义层 SDK
 - `laybot/request-sdk`：通用网络通信底座
 - `storage-sdk`：存储相关能力
 
-欢迎关注与 Star ❤️
+欢迎关注与 Star。
 
 ---
 
-## 18. 贡献指南
+## 22. 贡献指南
 
 ```bash
 git clone https://github.com/laybot/request-sdk.git

@@ -18,7 +18,10 @@ final class Trace
                     'method' => $request->getMethod(),
                     'uri' => (string)$request->getUri(),
                     'headers' => self::maskHeaders($request->getHeaders()),
-                    'body' => self::limitBody((string)$request->getBody()),
+                    'body' => self::formatBodyForLog(
+                        (string)$request->getBody(),
+                        $request->getHeaderLine('Content-Type')
+                    ),
                 ]);
 
                 return $handler($request, $options)->then(
@@ -27,7 +30,10 @@ final class Trace
                             $logger->debug('[HTTP] recv', [
                                 'status' => $response->getStatusCode(),
                                 'headers' => self::maskHeaders($response->getHeaders()),
-                                'body' => self::limitBody((string)$response->getBody()),
+                                'body' => self::formatBodyForLog(
+                                    (string)$response->getBody(),
+                                    $response->getHeaderLine('Content-Type')
+                                ),
                             ]);
                         } elseif (is_array($response)) {
                             $logger->debug('[HTTP] recv', $response);
@@ -55,14 +61,6 @@ final class Trace
         return $masked;
     }
 
-    /**
-     * 规则型敏感头判断
-     *
-     * 原则：
-     * 1. 明确高风险头固定脱敏
-     * 2. 对包含 token/secret/key/sign 等关键词的 header 自动脱敏
-     * 3. 避免每新增一个 x-xxx-token 都要改 SDK
-     */
     private static function isSensitiveHeader(string $headerName): bool
     {
         $name = strtolower(trim($headerName));
@@ -70,14 +68,47 @@ final class Trace
             return false;
         }
 
-        // 明确高优先级敏感头
         if (in_array($name, ['authorization', 'proxy-authorization'], true)) {
             return true;
         }
 
-        // 通用规则：包含这些关键词的 header 统一脱敏
         foreach (['token', 'secret', 'key', 'signature', 'sign'] as $kw) {
             if (str_contains($name, $kw)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static function formatBodyForLog(string $body, string $contentType, int $max = 2000): string
+    {
+        if ($body === '') {
+            return '';
+        }
+
+        $contentType = strtolower(trim($contentType));
+
+        if ($contentType !== '' && !self::isTextLikeContentType($contentType)) {
+            return '[binary omitted]';
+        }
+
+        return self::limitBody($body, $max);
+    }
+
+    private static function isTextLikeContentType(string $contentType): bool
+    {
+        foreach ([
+                     'application/json',
+                     'application/xml',
+                     'application/x-www-form-urlencoded',
+                     'application/javascript',
+                     'application/x-ndjson',
+                     'text/',
+                     'xml',
+                     'json',
+                 ] as $needle) {
+            if (str_contains($contentType, $needle)) {
                 return true;
             }
         }

@@ -112,6 +112,11 @@ final class GuzzleTransport implements TransportInterface
             );
         }
 
+        $contentType = strtolower($res->getHeaderLine('Content-Type'));
+        if ($contentType !== '' && !$this->isStreamFriendlyContentType($contentType)) {
+            throw new StreamException("unsupported stream content-type: {$contentType}");
+        }
+
         /** @var StreamInterface $body */
         $body = $res->getBody();
 
@@ -120,5 +125,21 @@ final class GuzzleTransport implements TransportInterface
         } catch (\Throwable $e) {
             throw new StreamException('stream decode failed: ' . $e->getMessage(), 0, $e);
         }
+    }
+
+    private function isStreamFriendlyContentType(string $contentType): bool
+    {
+        foreach ([
+                     'text/event-stream',
+                     'application/json',
+                     'application/x-ndjson',
+                     'text/plain',
+                 ] as $allowed) {
+            if (str_contains($contentType, $allowed)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

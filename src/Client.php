@@ -37,7 +37,9 @@ final class Client
     }
 
     /**
-     * 发送请求并默认解析 JSON
+     * 发送请求并默认解析 JSON 为 array
+     *
+     * 兼容旧行为：要求 JSON 解码结果必须为 array
      */
     public function send(
         string $method,
@@ -60,8 +62,63 @@ final class Client
     }
 
     /**
-     * 获取原始响应
+     * 发送请求并解析 JSON 为 mixed
      *
+     * 支持：
+     * - object => array
+     * - list   => array
+     * - string => string
+     * - number => int/float
+     * - bool   => bool
+     * - null   => null
+     */
+    public function sendAny(
+        string $method,
+        string $path,
+        array $opt = [],
+        bool $jsonDecode = true
+    ): mixed {
+        $prepared = $this->prepareOptions($method, $path, $opt);
+        $res = $this->driver->request(strtoupper($method), ltrim($path, '/'), $prepared);
+
+        if (!$jsonDecode) {
+            return $res['body'];
+        }
+
+        if ($res['body'] === '') {
+            return null;
+        }
+
+        return Json::decodeAny($res['body']);
+    }
+
+    /**
+     * 发送请求并将响应按 JSON 解码为 mixed
+     *
+     * 适合底层通用场景：
+     * - JSON object => array
+     * - JSON list   => array
+     * - JSON string => string
+     * - JSON number => int/float
+     * - JSON bool   => bool
+     * - JSON null   => null
+     */
+    public function requestJsonAny(string $method, string $path, array $opt = []): mixed
+    {
+        return $this->sendAny($method, $path, $opt, true);
+    }
+
+    /**
+     * 发送请求并将响应按 JSON 解码为 array
+     *
+     * 若响应 JSON 不是 object/list，则抛 JsonException。
+     */
+    public function requestJsonArray(string $method, string $path, array $opt = []): array
+    {
+        return $this->send($method, $path, $opt, true);
+    }
+
+    /**
      * @return array{status:int,headers:array,body:string}
      */
     public function requestRaw(string $method, string $path, array $opt = []): array
@@ -78,6 +135,14 @@ final class Client
         ]);
     }
 
+    public function getAny(string $path, array $query = [], array $hdr = []): mixed
+    {
+        return $this->sendAny('GET', $path, [
+            'query' => $query,
+            'headers' => $hdr,
+        ]);
+    }
+
     public function postJson(string $path, array $json = [], array $hdr = []): array
     {
         return $this->send('POST', $path, [
@@ -86,9 +151,25 @@ final class Client
         ]);
     }
 
+    public function postJsonAny(string $path, array $json = [], array $hdr = []): mixed
+    {
+        return $this->sendAny('POST', $path, [
+            'json' => $json,
+            'headers' => $hdr,
+        ]);
+    }
+
     public function postForm(string $path, array $form = [], array $hdr = []): array
     {
         return $this->send('POST', $path, [
+            'form_params' => $form,
+            'headers' => $hdr,
+        ]);
+    }
+
+    public function postFormAny(string $path, array $form = [], array $hdr = []): mixed
+    {
+        return $this->sendAny('POST', $path, [
             'form_params' => $form,
             'headers' => $hdr,
         ]);
@@ -103,6 +184,15 @@ final class Client
         return $this->send('POST', $path, $opt);
     }
 
+    public function postAny(string $path, string|array $body = '', array $hdr = []): mixed
+    {
+        $opt = is_array($body)
+            ? ['form_params' => $body, 'headers' => $hdr]
+            : ['body' => $body, 'headers' => $hdr];
+
+        return $this->sendAny('POST', $path, $opt);
+    }
+
     public function put(string $path, string|array $body = '', array $hdr = []): array
     {
         $opt = is_array($body)
@@ -110,6 +200,15 @@ final class Client
             : ['body' => $body, 'headers' => $hdr];
 
         return $this->send('PUT', $path, $opt);
+    }
+
+    public function putAny(string $path, string|array $body = '', array $hdr = []): mixed
+    {
+        $opt = is_array($body)
+            ? ['json' => $body, 'headers' => $hdr]
+            : ['body' => $body, 'headers' => $hdr];
+
+        return $this->sendAny('PUT', $path, $opt);
     }
 
     public function patch(string $path, string|array $body = '', array $hdr = []): array
@@ -121,6 +220,15 @@ final class Client
         return $this->send('PATCH', $path, $opt);
     }
 
+    public function patchAny(string $path, string|array $body = '', array $hdr = []): mixed
+    {
+        $opt = is_array($body)
+            ? ['json' => $body, 'headers' => $hdr]
+            : ['body' => $body, 'headers' => $hdr];
+
+        return $this->sendAny('PATCH', $path, $opt);
+    }
+
     public function delete(string $path, array $query = [], array $hdr = []): array
     {
         return $this->send('DELETE', $path, [
@@ -129,9 +237,15 @@ final class Client
         ]);
     }
 
+    public function deleteAny(string $path, array $query = [], array $hdr = []): mixed
+    {
+        return $this->sendAny('DELETE', $path, [
+            'query' => $query,
+            'headers' => $hdr,
+        ]);
+    }
+
     /**
-     * HEAD 更适合返回原始响应（状态码/响应头）
-     *
      * @return array{status:int,headers:array,body:string}
      */
     public function head(string $path, array $query = [], array $hdr = []): array
@@ -143,8 +257,6 @@ final class Client
     }
 
     /**
-     * OPTIONS 更适合返回原始响应
-     *
      * @return array{status:int,headers:array,body:string}
      */
     public function options(string $path, array $query = [], array $hdr = []): array
@@ -178,6 +290,10 @@ final class Client
             throw new InvalidArgumentException("file not readable: {$file}");
         }
 
+        if (isset($hdr['Content-Type']) || isset($hdr['content-type'])) {
+            throw new InvalidArgumentException('do not set Content-Type manually when using multipart upload');
+        }
+
         $fp = fopen($file, 'r');
         if ($fp === false) {
             throw new InvalidArgumentException("file open failed: {$file}");
@@ -194,12 +310,10 @@ final class Client
         foreach ($extra as $k => $v) {
             $multi[] = [
                 'name' => (string)$k,
-                'contents' => is_scalar($v) || $v === null ? (string)$v : Json::encode($v),
+                'contents' => $v === null
+                    ? ''
+                    : (is_scalar($v) ? (string)$v : Json::encode($v)),
             ];
-        }
-
-        if (isset($hdr['Content-Type']) || isset($hdr['content-type'])) {
-            throw new InvalidArgumentException('do not set Content-Type manually when using multipart upload');
         }
 
         try {
@@ -214,9 +328,6 @@ final class Client
         }
     }
 
-    /**
-     * 流式下载到本地文件，避免将整个响应体读入内存
-     */
     public function download(
         string $path,
         string $saveTo,
@@ -231,6 +342,10 @@ final class Client
         }
 
         $tmp = $saveTo . '.part';
+
+        if (is_file($tmp)) {
+            @unlink($tmp);
+        }
 
         try {
             $this->requestRaw('GET', $path, [
@@ -258,13 +373,6 @@ final class Client
     }
 
     /**
-     * 基础流式请求
-     *
-     * 默认：
-     * - POST JSON
-     * - decode.mode = data-line
-     * - decode.done_token = [DONE]
-     *
      * @param callable(string $chunk,bool $done):void $cb
      * @param array{
      *   transport?:string,
@@ -291,6 +399,12 @@ final class Client
         $mode = self::normalizeTransport($opt['transport'] ?? $this->cfg->transport);
         $driver = $this->pickStreamDriver($mode);
 
+        $decode = (array)($opt['decode'] ?? []);
+        $decodeMode = strtolower(trim((string)($decode['mode'] ?? 'data-line')));
+        if (!in_array($decodeMode, ['data-line', 'raw-line'], true)) {
+            $decodeMode = 'data-line';
+        }
+
         $driver->stream(
             'POST',
             ltrim($path, '/'),
@@ -304,9 +418,9 @@ final class Client
                     ? (int)$opt['idle_timeout']
                     : 0,
                 'decode' => [
-                    'mode' => $opt['decode']['mode'] ?? 'data-line',
-                    'done_token' => array_key_exists('done_token', $opt['decode'] ?? [])
-                        ? $opt['decode']['done_token']
+                    'mode' => $decodeMode,
+                    'done_token' => array_key_exists('done_token', $decode)
+                        ? $decode['done_token']
                         : '[DONE]',
                 ],
             ],

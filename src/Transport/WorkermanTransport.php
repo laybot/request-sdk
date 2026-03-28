@@ -20,8 +20,11 @@ final class WorkermanTransport implements TransportInterface
     private static array $pool = [];
 
     private string $baseUri;
-    private GuzzleTransport $fallback;
+    private float $timeout;
+    private bool $verify;
+    private int $retryTimes;
     private ?LoggerInterface $logger;
+    private GuzzleTransport $fallback;
 
     public function __construct(
         string $baseUri,
@@ -31,6 +34,9 @@ final class WorkermanTransport implements TransportInterface
         ?LoggerInterface $logger = null
     ) {
         $this->baseUri = rtrim($baseUri, '/') . '/';
+        $this->timeout = $timeout;
+        $this->verify = $verify;
+        $this->retryTimes = $retryTimes;
         $this->logger = $logger;
         $this->fallback = new GuzzleTransport(
             $baseUri,
@@ -57,19 +63,22 @@ final class WorkermanTransport implements TransportInterface
         unset($options['decode']);
 
         $mode = strtolower(trim((string)($decode['mode'] ?? 'data-line')));
+        if (!in_array($mode, ['data-line', 'raw-line'], true)) {
+            $mode = 'data-line';
+        }
+
         $doneToken = array_key_exists('done_token', $decode) ? $decode['done_token'] : '[DONE]';
 
         $url = $this->absoluteUrl($uri);
         $parsed = parse_url($url);
-
         if (!$parsed || empty($parsed['host'])) {
-            $this->fallback->stream($method, $uri, $options, $onChunk);
+            $this->fallback->stream($method, $uri, $options + ['decode' => $decode], $onChunk);
             return;
         }
 
         $headers = $options['headers'] ?? [];
         $body = (string)($options['body'] ?? '');
-        $connectTimeout = (float)($options['connectTimeout'] ?? 10);
+        $connectTimeout = (float)($options['connectTimeout'] ?? $this->timeout);
         $idleTimeout = (int)($options['idleTimeout'] ?? 180);
 
         $scheme = strtolower((string)($parsed['scheme'] ?? 'http'));
@@ -110,6 +119,23 @@ final class WorkermanTransport implements TransportInterface
         self::$pool[$connId] = $conn;
 
         $idleTimer = null;
+        $buffer = '';
+        $headerDone = false;
+        $ended = false;
+        $doneEmitted = false;
+        $rawHeader = '';
+        $responseHeaders = [];
+        $statusCode = 0;
+        $fallbackMode = false;
+
+        $cleanup = static function () use (&$idleTimer, $connId): void {
+            if ($idleTimer !== null) {
+                Timer::del($idleTimer);
+                $idleTimer = null;
+            }
+            unset(self::$pool[$connId]);
+        };
+
         $touch = static function () use (&$idleTimer, $idleTimeout, $conn): void {
             if ($idleTimeout <= 0) {
                 return;
@@ -122,51 +148,69 @@ final class WorkermanTransport implements TransportInterface
             }, [], false);
         };
 
-        $buffer = '';
-        $headerDone = false;
-        $ended = false;
-        $statusChecked = false;
-        $statusCode = 0;
-        $rawHeader = '';
-
-        $end = function () use (&$idleTimer, &$ended, $onChunk, $connId): void {
+        $end = function (bool $emitDone = true) use (&$ended, &$doneEmitted, $cleanup, $onChunk): void {
             if ($ended) {
                 return;
             }
             $ended = true;
+            $cleanup();
 
-            if ($idleTimer !== null) {
-                Timer::del($idleTimer);
-                $idleTimer = null;
+            if ($emitDone && !$doneEmitted) {
+                $doneEmitted = true;
+                $onChunk('', true);
             }
-
-            unset(self::$pool[$connId]);
-            $onChunk('', true);
         };
 
-        $fail = function (string $message) use (&$idleTimer, &$ended, $connId): void {
-            if ($ended) {
+        $log = function (string $level, string $message, array $context = []) : void {
+            if ($this->logger === null) {
                 return;
             }
-            $ended = true;
-
-            if ($idleTimer !== null) {
-                Timer::del($idleTimer);
-                $idleTimer = null;
+            try {
+                $this->logger->log($level, $message, $context);
+            } catch (\Throwable) {
+                // ignore logger failure
             }
-
-            unset(self::$pool[$connId]);
-            throw new StreamException($message);
         };
 
-        $emitLine = static function (string $line) use ($mode, $doneToken, $onChunk): void {
+        $fallbackToGuzzle = function (string $reason) use (
+            &$fallbackMode,
+            &$ended,
+            $cleanup,
+            $method,
+            $uri,
+            $options,
+            $decode,
+            $onChunk,
+            $log
+        ): void {
+            if ($fallbackMode || $ended) {
+                return;
+            }
+
+            $fallbackMode = true;
+            $ended = true;
+            $cleanup();
+
+            $log('warning', '[stream] workerman fallback to guzzle', [
+                'reason' => $reason,
+                'uri' => $uri,
+            ]);
+
+            $this->fallback->stream($method, $uri, $options + ['decode' => $decode], $onChunk);
+        };
+
+        $emitLine = function (string $line) use ($mode, $doneToken, $onChunk, &$doneEmitted, $conn, $end): void {
             if ($mode === 'raw-line') {
                 if ($line === '') {
                     return;
                 }
 
                 if ($doneToken !== null && $line === $doneToken) {
-                    $onChunk('', true);
+                    if (!$doneEmitted) {
+                        $doneEmitted = true;
+                        $onChunk('', true);
+                    }
+                    $conn->close();
                     return;
                 }
 
@@ -181,7 +225,11 @@ final class WorkermanTransport implements TransportInterface
             $payload = trim(substr($line, 5));
 
             if ($doneToken !== null && $payload === $doneToken) {
-                $onChunk('', true);
+                if (!$doneEmitted) {
+                    $doneEmitted = true;
+                    $onChunk('', true);
+                }
+                $conn->close();
                 return;
             }
 
@@ -200,14 +248,19 @@ final class WorkermanTransport implements TransportInterface
         $conn->onMessage = function ($connection, string $chunk) use (
             &$buffer,
             &$headerDone,
-            &$statusChecked,
-            &$statusCode,
             &$rawHeader,
-            $emitLine,
+            &$responseHeaders,
+            &$statusCode,
+            &$fallbackMode,
             $touch,
-            $fail,
-            $end
+            $emitLine,
+            $fallbackToGuzzle,
+            $log
         ): void {
+            if ($fallbackMode) {
+                return;
+            }
+
             $touch();
             $buffer .= $chunk;
 
@@ -220,53 +273,60 @@ final class WorkermanTransport implements TransportInterface
                 $rawHeader = substr($buffer, 0, $pos);
                 $buffer = substr($buffer, $pos + 4);
                 $headerDone = true;
-            }
 
-            if (!$statusChecked) {
-                $statusChecked = true;
-                $lines = explode("\r\n", $rawHeader);
-                $statusLine = $lines[0] ?? '';
+                [$statusCode, $responseHeaders] = $this->parseResponseHeader($rawHeader);
 
-                if (!preg_match('#^HTTP/\d+\.\d+\s+(\d{3})#', $statusLine, $m)) {
-                    $fail('invalid stream response status line');
-                    return;
-                }
-
-                $statusCode = (int)$m[1];
                 if ($statusCode < 200 || $statusCode >= 300) {
-                    $fail('stream http ' . $statusCode);
+                    $fallbackToGuzzle('non-2xx-stream-response');
                     return;
                 }
+
+                if ($this->shouldFallbackByHeaders($responseHeaders)) {
+                    $fallbackToGuzzle('complex-stream-headers');
+                    return;
+                }
+
+                $contentType = strtolower($responseHeaders['content-type'][0] ?? '');
+                if ($contentType !== '' && !$this->isSafeTextStreamContentType($contentType)) {
+                    $fallbackToGuzzle('unsupported-content-type');
+                    return;
+                }
+
+                $log('debug', '[stream] workerman stream accepted', [
+                    'status' => $statusCode,
+                    'headers' => $responseHeaders,
+                ]);
             }
 
             while (($pos = strpos($buffer, "\n")) !== false) {
                 $line = rtrim(substr($buffer, 0, $pos), "\r");
                 $buffer = substr($buffer, $pos + 1);
-
-                if ($line === '') {
-                    continue;
-                }
-
-                $beforeDone = $buffer;
                 $emitLine($line);
-
-                // 若上面触发了 done，连接会在服务端关闭；这里不主动 close，避免回调重入
-                if ($beforeDone !== $buffer) {
-                    // no-op，仅保留结构一致性
-                }
             }
         };
 
-        $conn->onClose = static function () use ($end): void {
-            $end();
+        $conn->onClose = function () use (&$fallbackMode, $end): void {
+            if ($fallbackMode) {
+                return;
+            }
+            $end(true);
         };
 
-        $conn->onError = static function ($connection, $code = 0, $msg = '') use ($fail): void {
-            $message = 'stream connection error';
-            if ($code || $msg !== '') {
-                $message .= " [{$code}] {$msg}";
+        $conn->onError = function ($connection, $code = 0, $msg = '') use (&$fallbackMode, $fallbackToGuzzle, $log, $end): void {
+            if ($fallbackMode) {
+                return;
             }
-            $fail($message);
+
+            $log('warning', '[stream] workerman connection error', [
+                'code' => $code,
+                'message' => $msg,
+            ]);
+
+            // 连接阶段/协议阶段异常，优先回退
+            $fallbackToGuzzle('connection-error');
+
+            // 若 fallback 未接管，则至少结束回调
+            $end(true);
         };
 
         try {
@@ -284,5 +344,77 @@ final class WorkermanTransport implements TransportInterface
         }
 
         return $this->baseUri . ltrim($uri, '/');
+    }
+
+    /**
+     * @return array{0:int,1:array<string,array<int,string>>}
+     */
+    private function parseResponseHeader(string $rawHeader): array
+    {
+        $lines = explode("\r\n", $rawHeader);
+        $statusLine = array_shift($lines) ?? '';
+
+        if (!preg_match('#^HTTP/\d+\.\d+\s+(\d{3})#', $statusLine, $m)) {
+            throw new StreamException('invalid stream response status line');
+        }
+
+        $status = (int)$m[1];
+        $headers = [];
+
+        foreach ($lines as $line) {
+            $pos = strpos($line, ':');
+            if ($pos === false) {
+                continue;
+            }
+
+            $name = strtolower(trim(substr($line, 0, $pos)));
+            $value = trim(substr($line, $pos + 1));
+
+            if ($name === '') {
+                continue;
+            }
+
+            $headers[$name][] = $value;
+        }
+
+        return [$status, $headers];
+    }
+
+    /**
+     * 发现复杂编码时，直接回退到 Guzzle
+     *
+     * @param array<string,array<int,string>> $headers
+     */
+    private function shouldFallbackByHeaders(array $headers): bool
+    {
+        $transferEncoding = strtolower(implode(',', $headers['transfer-encoding'] ?? []));
+        if ($transferEncoding !== '' && str_contains($transferEncoding, 'chunked')) {
+            return true;
+        }
+
+        $contentEncoding = strtolower(implode(',', $headers['content-encoding'] ?? []));
+        foreach (['gzip', 'deflate', 'br'] as $encoding) {
+            if ($contentEncoding !== '' && str_contains($contentEncoding, $encoding)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function isSafeTextStreamContentType(string $contentType): bool
+    {
+        foreach ([
+                     'text/event-stream',
+                     'application/json',
+                     'application/x-ndjson',
+                     'text/plain',
+                 ] as $allowed) {
+            if (str_contains($contentType, $allowed)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }
