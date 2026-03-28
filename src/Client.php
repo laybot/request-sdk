@@ -12,6 +12,7 @@ use LayBot\Request\Signer\BearerSigner;
 use LayBot\Request\Signer\HmacSigner;
 use LayBot\Request\Signer\InnerSigner;
 use LayBot\Request\Signer\NoneSigner;
+use LayBot\Request\Signer\HeaderSigner;
 use LayBot\Request\Support\Env;
 use LayBot\Request\Support\Json;
 use LayBot\Request\Support\Query;
@@ -399,6 +400,7 @@ final class Client
         }
 
         $signer = $o['signer'] ?? match (true) {
+            isset($o['custom_headers']) && is_array($o['custom_headers']) => new HeaderSigner((array)$o['custom_headers']),
             isset($o['api_key'], $o['api_secret']) => new HmacSigner((string)$o['api_key'], (string)$o['api_secret']),
             isset($o['token']) => new BearerSigner((string)$o['token']),
             isset($o['username'], $o['password']) => new BasicSigner((string)$o['username'], (string)$o['password']),
