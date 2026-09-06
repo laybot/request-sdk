@@ -1,20 +1,31 @@
 {
   "name": "laybot/request-sdk",
-  "description": "LayBot universal PHP HTTP request toolkit (Guzzle + Workerman + SSE)",
+  "description": "Reliable HTTP, SSE, JSON Lines and WebSocket client for PHP/Webman",
   "type": "library",
   "license": "MIT",
+  "keywords": [
+    "http",
+    "websocket",
+    "sse",
+    "ndjson",
+    "webman",
+    "workerman",
+    "guzzle",
+    "laybot"
+  ],
   "require": {
     "php": ">=8.1",
-    "guzzlehttp/guzzle": "^7.8",
+    "ext-curl": "*",
+    "ext-json": "*",
+    "ext-openssl": "*",
+    "guzzlehttp/guzzle": "^7.13",
     "psr/http-message": "^1.0 || ^2.0",
     "psr/log": "^3.0",
-    "workerman/workerman": "^4.1 || ^5.0"
+    "workerman/workerman": "^5.2",
+    "workerman/http-client": "^3.1"
   },
   "require-dev": {
-    "phpunit/phpunit": "^9.6"
-  },
-  "suggest": {
-    "workerman/workerman": "Enable coroutine transport for Webman/Workerman stream mode"
+    "phpunit/phpunit": "^10.5 || ^11.0"
   },
   "autoload": {
     "psr-4": {
@@ -32,15 +43,14 @@
       "email": "larry@laybot.cn"
     }
   ],
-  "keywords": [
-    "http",
-    "guzzle",
-    "workerman",
-    "webman",
-    "sse",
-    "sdk",
-    "laybot"
-  ],
   "minimum-stability": "stable",
-  "prefer-stable": true
+  "prefer-stable": true,
+  "config": {
+    "sort-packages": true
+  },
+  "scripts": {
+    "test": "phpunit --colors=always",
+    "lint": "find src tests -name '*.php' -print0 | xargs -0 -n1 php -l"
+  }
 }
+

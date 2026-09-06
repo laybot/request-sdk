@@ -5,27 +5,32 @@ namespace LayBot\Request\Exception;
 
 class HttpException extends RequestException
 {
-    private int $statusCode;
-    private string $responseBody;
-    private array $responseHeaders;
-    private ?string $method;
-    private ?string $uri;
+    private readonly string $responseBody;
 
     public function __construct(
         string $message,
-        int $statusCode,
+        private readonly int $statusCode,
         string $responseBody = '',
         array $responseHeaders = [],
         ?string $method = null,
-        ?string $uri = null,
-        ?\Throwable $previous = null
+        ?string $url = null,
+        ?string $requestId = null,
+        bool $retryable = false,
+        ?\Throwable $previous = null,
     ) {
-        parent::__construct($message, $statusCode, $previous);
-        $this->statusCode = $statusCode;
-        $this->responseBody = $responseBody;
-        $this->responseHeaders = $responseHeaders;
-        $this->method = $method;
-        $this->uri = $uri;
+        $this->responseBody = self::truncate($responseBody, 65_536);
+
+        parent::__construct(
+            message: $message,
+            code: $statusCode,
+            previous: $previous,
+            method: $method,
+            url: $url,
+            requestId: $requestId,
+            responseHeaders: $responseHeaders,
+            responseSummary: self::truncate($responseBody, 2_048),
+            retryable: $retryable,
+        );
     }
 
     public function getStatusCode(): int
@@ -33,23 +38,21 @@ class HttpException extends RequestException
         return $this->statusCode;
     }
 
+    /**
+     * 为避免 Token 兑换等错误响应泄漏和常驻内存膨胀，
+     * 此处最多保留响应正文前 64KB。
+     */
     public function getResponseBody(): string
     {
         return $this->responseBody;
     }
 
-    public function getResponseHeaders(): array
+    private static function truncate(string $value, int $limit): string
     {
-        return $this->responseHeaders;
-    }
+        if (strlen($value) <= $limit) {
+            return $value;
+        }
 
-    public function getMethod(): ?string
-    {
-        return $this->method;
-    }
-
-    public function getUri(): ?string
-    {
-        return $this->uri;
+        return substr($value, 0, $limit) . '...<truncated>';
     }
 }

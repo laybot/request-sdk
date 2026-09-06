@@ -3,15 +3,23 @@ declare(strict_types=1);
 
 namespace LayBot\Request\Contract;
 
+use LayBot\Request\DTO\PreparedRequest;
+use LayBot\Request\DTO\Response;
+use LayBot\Request\DTO\StreamResult;
+
 interface TransportInterface
 {
-    /**
-     * @return array{status:int,headers:array,body:string}
-     */
-    public function request(string $method, string $uri, array $options): array;
+    public function request(PreparedRequest $request): Response;
 
     /**
-     * @param callable(string $chunk,bool $done):void $onChunk
+     * 同步阻塞式原始响应流。
+     *
+     * onChunk 返回 false 表示正常提前终止读取。
+     *
+     * @param callable(string):(bool|null) $onChunk
      */
-    public function stream(string $method, string $uri, array $options, callable $onChunk): void;
+    public function stream(
+        PreparedRequest $request,
+        callable $onChunk
+    ): StreamResult;
 }

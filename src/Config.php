@@ -3,83 +3,83 @@ declare(strict_types=1);
 
 namespace LayBot\Request;
 
+use LayBot\Request\Contract\ContextSignerInterface;
 use LayBot\Request\Contract\SignerInterface;
+use LayBot\Request\Middleware\RetryPolicy;
 use LayBot\Request\Signer\NoneSigner;
+use LayBot\Request\Timeout\TimeoutConfig;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
 final class Config
 {
-    public string $baseUri;
-    public array $headers;
-    public float $timeout;
-    public string $transport;
-    public int $retryTimes;
-    public bool $verify;
-    public ?LoggerInterface $logger;
-    public SignerInterface $signer;
-    public string $queryArrayFormat;
-    public ?string $userAgent;
-
+    /**
+     * @param list<string> $sensitiveHeaders
+     */
     public function __construct(
-        string $baseUri,
-        array $headers = [],
-        float $timeout = 10.0,
-        string $transport = 'auto',
-        int $retryTimes = 2,
-        bool $verify = true,
-        ?SignerInterface $signer = null,
-        ?LoggerInterface $logger = null,
-        string $queryArrayFormat = 'brackets',
-        ?string $userAgent = null,
+        public string                                 $baseUri,
+        public array                                  $headers = [],
+        public SignerInterface|ContextSignerInterface $signer =
+        new NoneSigner(),
+        public LoggerInterface|NullLogger             $logger = new NullLogger(),
+        public bool                                   $verify = true,
+        public TimeoutConfig                          $timeouts = new TimeoutConfig(),
+        public RetryPolicy                            $retryPolicy = new RetryPolicy(),
+        public string                                 $queryArrayFormat = 'brackets',
+        public ?string                                $userAgent = null,
+        public bool                                   $logBodies = false,
+        public int                                    $maxResponseBytes = 16_777_216,
+        public array                                  $sensitiveHeaders = [],
     ) {
-        $this->baseUri = rtrim($baseUri, '/') . '/';
-        $this->headers = $headers;
-        $this->timeout = $timeout;
-        $this->transport = $transport;
-        $this->retryTimes = max(0, $retryTimes);
-        $this->verify = $verify;
-        $this->signer = $signer ?? new NoneSigner();
-        $this->logger = $logger ?? new NullLogger();
-        $this->queryArrayFormat = $queryArrayFormat;
-        $this->userAgent = $userAgent;
+        $this->baseUri = rtrim($this->baseUri, '/') . '/';
+
+        if (!preg_match('#^https?://#i', $this->baseUri)) {
+            throw new \InvalidArgumentException(
+                'baseUri must use HTTP or HTTPS'
+            );
+        }
+
+        if ($this->maxResponseBytes < 1) {
+            throw new \InvalidArgumentException(
+                'maxResponseBytes must be greater than zero'
+            );
+        }
+
+        $this->sensitiveHeaders = self::normalizeHeaderNames(
+            $this->sensitiveHeaders
+        );
     }
 
-    public function withSigner(SignerInterface $signer): self
-    {
+    public function withSigner(
+        SignerInterface|ContextSignerInterface $signer
+    ): self {
         $new = clone $this;
         $new->signer = $signer;
+
         return $new;
     }
 
-    public function withLogger(?LoggerInterface $logger): self
+    public function withLogger(LoggerInterface $logger): self
     {
         $new = clone $this;
-        $new->logger = $logger ?? new NullLogger();
+        $new->logger = $logger;
+
         return $new;
     }
 
-    public function withRetry(int $times): self
-    {
-        $new = clone $this;
-        $new->retryTimes = max(0, $times);
-        return $new;
-    }
-
-    /**
-     * 追加/覆盖 headers，而不是整体替换
-     */
     public function withHeaders(array $headers): self
     {
         $new = clone $this;
         $new->headers = array_merge($this->headers, $headers);
+
         return $new;
     }
 
-    public function withTimeout(float $timeout): self
+    public function withTimeouts(TimeoutConfig $timeouts): self
     {
         $new = clone $this;
-        $new->timeout = max(0.1, $timeout);
+        $new->timeouts = $timeouts;
+
         return $new;
     }
 
@@ -87,27 +87,59 @@ final class Config
     {
         $new = clone $this;
         $new->verify = $verify;
+
         return $new;
     }
 
-    public function withTransport(string $transport): self
+    public function withRetryPolicy(RetryPolicy $policy): self
     {
         $new = clone $this;
-        $new->transport = $transport;
+        $new->retryPolicy = $policy;
+
         return $new;
     }
 
-    public function withQueryArrayFormat(string $format): self
-    {
+    /**
+     * 注册日志中需要脱敏的自定义 Header。
+     *
+     * 支持完整名称及末尾通配符：
+     *
+     *   X-Gateway-Credential
+     *   X-Proxy-*
+     *
+     * @param list<string> $headers
+     */
+    public function withSensitiveHeaders(
+        array $headers,
+        bool $replace = false
+    ): self {
         $new = clone $this;
-        $new->queryArrayFormat = $format;
+
+        $values = $replace
+            ? $headers
+            : array_merge($this->sensitiveHeaders, $headers);
+
+        $new->sensitiveHeaders = self::normalizeHeaderNames($values);
+
         return $new;
     }
 
-    public function withUserAgent(?string $userAgent): self
+    /**
+     * @param list<string> $headers
+     * @return list<string>
+     */
+    private static function normalizeHeaderNames(array $headers): array
     {
-        $new = clone $this;
-        $new->userAgent = $userAgent;
-        return $new;
+        $result = [];
+
+        foreach ($headers as $header) {
+            $name = strtolower(trim((string)$header));
+
+            if ($name !== '') {
+                $result[] = $name;
+            }
+        }
+
+        return array_values(array_unique($result));
     }
 }

@@ -7,7 +7,10 @@ final class UserAgent
 {
     public static function default(): string
     {
-        return 'PHP-HTTP-Client/0.5';
+        return sprintf(
+            'laybot-request-sdk/2.0 PHP/%s',
+            PHP_VERSION
+        );
     }
 
     private function __construct()

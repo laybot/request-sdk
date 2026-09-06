@@ -3,418 +3,763 @@ declare(strict_types=1);
 
 namespace LayBot\Request\Transport;
 
-use LayBot\Request\Contract\TransportInterface;
-use LayBot\Request\Exception\StreamException;
+use LayBot\Request\Contract\AsyncHttpTransportInterface;
+use LayBot\Request\DTO\PreparedRequest;
+use LayBot\Request\DTO\Response;
+use LayBot\Request\DTO\ResponseHead;
+use LayBot\Request\DTO\StreamResult;
+use LayBot\Request\Enum\StreamTermination;
+use LayBot\Request\Exception\CancelledException;
+use LayBot\Request\Exception\ConfigurationException;
+use LayBot\Request\Exception\ConnectionException;
+use LayBot\Request\Exception\ConnectTimeoutException;
+use LayBot\Request\Exception\RequestException;
+use LayBot\Request\Exception\RequestTimeoutException;
+use LayBot\Request\Exception\StreamCallbackException;
+use LayBot\Request\Exception\StreamIdleTimeoutException;
+use LayBot\Request\Exception\TlsException;
+use LayBot\Request\Exception\UnexpectedEofException;
+use LayBot\Request\Stream\AsyncRequestHandle;
+use LayBot\Request\Stream\CancellationRegistration;
 use LayBot\Request\Support\Env;
-use Psr\Log\LoggerInterface;
-use Workerman\Connection\AsyncTcpConnection;
+use LayBot\Request\Support\ExceptionFactory;
+use LayBot\Request\Support\Header;
+use LayBot\Request\Transport\Internal\ManagedHttpRequest;
+use Psr\Http\Message\ResponseInterface;
+use Workerman\Http\ConnectionPool;
 use Workerman\Timer;
 
-final class WorkermanTransport implements TransportInterface
+final class WorkermanTransport implements AsyncHttpTransportInterface
 {
-    /**
-     * 持有活跃连接，避免被 GC 提前回收
-     *
-     * @var array<int, AsyncTcpConnection>
-     */
-    private static array $pool = [];
-
-    private string $baseUri;
-    private float $timeout;
-    private bool $verify;
-    private int $retryTimes;
-    private ?LoggerInterface $logger;
-    private GuzzleTransport $fallback;
+    private ConnectionPool $pool;
 
     public function __construct(
-        string $baseUri,
-        float $timeout = 10.0,
-        bool $verify = true,
-        int $retryTimes = 2,
-        ?LoggerInterface $logger = null
+        private readonly bool $verify = true
     ) {
-        $this->baseUri = rtrim($baseUri, '/') . '/';
-        $this->timeout = $timeout;
-        $this->verify = $verify;
-        $this->retryTimes = $retryTimes;
-        $this->logger = $logger;
-        $this->fallback = new GuzzleTransport(
-            $baseUri,
-            $timeout,
-            $verify,
-            $retryTimes,
-            $logger
+        $this->pool = new ConnectionPool([
+            'max_conn_per_addr' => 128,
+            'keepalive_timeout' => 15,
+
+            /*
+             * 精确超时由本 Transport 自己的 Timer 控制。
+             * 这里设置较大值，只作为底层连接池兜底。
+             */
+            'connect_timeout' => 3600,
+            'timeout' => 86400,
+
+            'context' => [
+                'ssl' => [
+                    'verify_peer' => $this->verify,
+                    'verify_peer_name' => $this->verify,
+                    'allow_self_signed' => !$this->verify,
+                    'SNI_enabled' => true,
+                    'disable_compression' => true,
+                ],
+            ],
+        ]);
+    }
+
+    public function requestAsync(
+        PreparedRequest $request,
+        callable $onComplete,
+        callable $onError
+    ): AsyncRequestHandle {
+        return $this->execute(
+            prepared: $request,
+            streaming: false,
+            onOpen: static function (ResponseHead $head): void {
+            },
+            onChunk: static function (string $chunk): bool {
+                return true;
+            },
+            onComplete: $onComplete,
+            onError: $onError
         );
     }
 
-    public function request(string $method, string $uri, array $options): array
-    {
-        return $this->fallback->request($method, $uri, $options);
+    public function streamAsync(
+        PreparedRequest $request,
+        callable $onOpen,
+        callable $onChunk,
+        callable $onComplete,
+        callable $onError
+    ): AsyncRequestHandle {
+        return $this->execute(
+            prepared: $request,
+            streaming: true,
+            onOpen: $onOpen,
+            onChunk: $onChunk,
+            onComplete: $onComplete,
+            onError: $onError
+        );
     }
 
-    public function stream(string $method, string $uri, array $options, callable $onChunk): void
-    {
+    private function execute(
+        PreparedRequest $prepared,
+        bool $streaming,
+        callable $onOpen,
+        callable $onChunk,
+        callable $onComplete,
+        callable $onError
+    ): AsyncRequestHandle {
         if (!Env::inWorkermanLoop()) {
-            $this->fallback->stream($method, $uri, $options, $onChunk);
-            return;
+            throw new ConfigurationException(
+                'WorkermanTransport requires an active Workerman event loop'
+            );
         }
 
-        $decode = (array)($options['decode'] ?? []);
-        unset($options['decode']);
+        $prepared->cancellation?->throwIfCancelled();
 
-        $mode = strtolower(trim((string)($decode['mode'] ?? 'data-line')));
-        if (!in_array($mode, ['data-line', 'raw-line'], true)) {
-            $mode = 'data-line';
-        }
+        $handle = new AsyncRequestHandle();
+        $handle->markRunning();
 
-        $doneToken = array_key_exists('done_token', $decode) ? $decode['done_token'] : '[DONE]';
+        $startedAt = hrtime(true);
+        $terminal = false;
+        $head = null;
+        $errorBody = '';
+        $pooled = false;
 
-        $url = $this->absoluteUrl($uri);
-        $parsed = parse_url($url);
-        if (!$parsed || empty($parsed['host'])) {
-            $this->fallback->stream($method, $uri, $options + ['decode' => $decode], $onChunk);
-            return;
-        }
-
-        $headers = $options['headers'] ?? [];
-        $body = (string)($options['body'] ?? '');
-        $connectTimeout = (float)($options['connectTimeout'] ?? $this->timeout);
-        $idleTimeout = (int)($options['idleTimeout'] ?? 180);
-
-        $scheme = strtolower((string)($parsed['scheme'] ?? 'http'));
-        $ssl = $scheme === 'https';
-        $host = (string)$parsed['host'];
-        $port = (int)($parsed['port'] ?? ($ssl ? 443 : 80));
-        $path = ($parsed['path'] ?? '/') . (isset($parsed['query']) ? '?' . $parsed['query'] : '');
-
-        $addr = 'tcp://' . $host . ':' . $port;
-
-        $request = strtoupper($method) . " {$path} HTTP/1.1\r\n";
-        $request .= "Host: {$host}\r\n";
-        $request .= "Connection: close\r\n";
-
-        foreach ($headers as $k => $v) {
-            if (is_array($v)) {
-                foreach ($v as $vv) {
-                    $request .= "{$k}: {$vv}\r\n";
-                }
-            } else {
-                $request .= "{$k}: {$v}\r\n";
-            }
-        }
-
-        if ($body !== '') {
-            $request .= 'Content-Length: ' . strlen($body) . "\r\n";
-        }
-
-        $request .= "\r\n" . $body;
-
-        $conn = new AsyncTcpConnection($addr);
-        if ($ssl) {
-            $conn->transport = 'ssl';
-        }
-        $conn->connectTimeout = $connectTimeout;
-
-        $connId = spl_object_id($conn);
-        self::$pool[$connId] = $conn;
-
+        $connectTimer = null;
+        $requestTimer = null;
         $idleTimer = null;
-        $buffer = '';
-        $headerDone = false;
-        $ended = false;
-        $doneEmitted = false;
-        $rawHeader = '';
-        $responseHeaders = [];
-        $statusCode = 0;
-        $fallbackMode = false;
 
-        $cleanup = static function () use (&$idleTimer, $connId): void {
-            if ($idleTimer !== null) {
-                Timer::del($idleTimer);
-                $idleTimer = null;
+        $cancellationRegistration = null;
+
+        [$sink, $closeSink] = $this->openSink($prepared->sink);
+
+        $request = new ManagedHttpRequest(
+            url: $prepared->url,
+            storeResponseBody: !$streaming && $sink === null,
+            maxResponseBytes: $prepared->maxResponseBytes
+        );
+
+        $clearTimers = static function () use (
+            &$connectTimer,
+            &$requestTimer,
+            &$idleTimer
+        ): void {
+            foreach (
+                [$connectTimer, $requestTimer, $idleTimer]
+                as $timer
+            ) {
+                if ($timer !== null) {
+                    Timer::del($timer);
+                }
             }
-            unset(self::$pool[$connId]);
+
+            $connectTimer = null;
+            $requestTimer = null;
+            $idleTimer = null;
         };
 
-        $touch = static function () use (&$idleTimer, $idleTimeout, $conn): void {
-            if ($idleTimeout <= 0) {
+        $releaseSink = static function () use (
+            &$sink,
+            $closeSink
+        ): void {
+            if (!is_resource($sink)) {
                 return;
             }
-            if ($idleTimer !== null) {
-                Timer::del($idleTimer);
+
+            @fflush($sink);
+
+            if ($closeSink) {
+                @fclose($sink);
             }
-            $idleTimer = Timer::add($idleTimeout, static function () use ($conn) {
-                $conn->close();
-            }, [], false);
+
+            $sink = null;
         };
 
-        $end = function (bool $emitDone = true) use (&$ended, &$doneEmitted, $cleanup, $onChunk): void {
-            if ($ended) {
-                return;
-            }
-            $ended = true;
-            $cleanup();
+        $clearCommon = static function () use (
+            $clearTimers,
+            $releaseSink,
+            &$cancellationRegistration
+        ): void {
+            $clearTimers();
+            $releaseSink();
 
-            if ($emitDone && !$doneEmitted) {
-                $doneEmitted = true;
-                $onChunk('', true);
+            if (
+                $cancellationRegistration
+                instanceof CancellationRegistration
+            ) {
+                $cancellationRegistration->unregister();
+                $cancellationRegistration = null;
             }
         };
 
-        $log = function (string $level, string $message, array $context = []) : void {
-            if ($this->logger === null) {
+        $finishError = function (\Throwable $error) use (
+            &$terminal,
+            &$pooled,
+            $clearCommon,
+            $request,
+            $handle,
+            $onError,
+            $prepared
+        ): void {
+            if ($terminal) {
                 return;
             }
+
+            $terminal = true;
+            $clearCommon();
+            $request->abort($this->pool, $pooled);
+
+            if (!$error instanceof RequestException) {
+                $error = $this->mapNetworkError(
+                    $error,
+                    $prepared
+                );
+            }
+
+            if ($error instanceof CancelledException) {
+                $handle->markCancelled();
+            } else {
+                $handle->markFailed();
+            }
+
             try {
-                $this->logger->log($level, $message, $context);
+                $onError($error);
             } catch (\Throwable) {
-                // ignore logger failure
+                // onError 是异步生命周期最终边界。
             }
         };
 
-        $fallbackToGuzzle = function (string $reason) use (
-            &$fallbackMode,
-            &$ended,
-            $cleanup,
-            $method,
-            $uri,
-            $options,
-            $decode,
-            $onChunk,
-            $log
+        $touchIdle = function () use (
+            &$idleTimer,
+            $prepared,
+            $streaming,
+            $finishError
         ): void {
-            if ($fallbackMode || $ended) {
+            if (!$streaming || $prepared->timeouts->idle <= 0) {
                 return;
             }
 
-            $fallbackMode = true;
-            $ended = true;
-            $cleanup();
+            if ($idleTimer !== null) {
+                Timer::del($idleTimer);
+            }
 
-            $log('warning', '[stream] workerman fallback to guzzle', [
-                'reason' => $reason,
-                'uri' => $uri,
-            ]);
-
-            $this->fallback->stream($method, $uri, $options + ['decode' => $decode], $onChunk);
+            $idleTimer = Timer::delay(
+                $prepared->timeouts->idle,
+                static function () use ($finishError): void {
+                    $finishError(new StreamIdleTimeoutException(
+                        'stream idle timeout',
+                        retryable: true
+                    ));
+                }
+            );
         };
 
-        $emitLine = function (string $line) use ($mode, $doneToken, $onChunk, &$doneEmitted, $conn, $end): void {
-            if ($mode === 'raw-line') {
-                if ($line === '') {
+        $finishEarly = function (
+            StreamTermination $termination
+        ) use (
+            &$terminal,
+            &$head,
+            &$pooled,
+            $clearCommon,
+            $request,
+            $handle,
+            $onComplete,
+            $onError,
+            $prepared,
+            $startedAt
+        ): void {
+            if ($terminal) {
+                return;
+            }
+
+            if (!$head instanceof ResponseHead) {
+                return;
+            }
+
+            $terminal = true;
+            $clearCommon();
+
+            /*
+             * 提前结束时响应尚未消费完，该连接不可复用。
+             */
+            $request->abort($this->pool, $pooled);
+
+            $result = new StreamResult(
+                status: $head->status,
+                headers: $head->headers,
+                url: $prepared->url,
+                termination: $termination,
+                bytesReceived: $request->receivedBytes(),
+                durationMs: self::elapsed($startedAt)
+            );
+
+            try {
+                $onComplete($result);
+                $handle->markCompleted();
+            } catch (\Throwable $error) {
+                $handle->markFailed();
+
+                try {
+                    $onError(new StreamCallbackException(
+                        'completion callback failed: '
+                        . $error->getMessage(),
+                        previous: $error
+                    ));
+                } catch (\Throwable) {
+                }
+            }
+        };
+
+        $finishSuccess = function (
+            ResponseInterface $nativeResponse
+        ) use (
+            &$terminal,
+            &$pooled,
+            &$errorBody,
+            $clearCommon,
+            $request,
+            $handle,
+            $prepared,
+            $streaming,
+            $onComplete,
+            $onError,
+            $startedAt
+        ): void {
+            if ($terminal) {
+                return;
+            }
+
+            $status = $nativeResponse->getStatusCode();
+            $headers = Header::normalize(
+                $nativeResponse->getHeaders()
+            );
+
+            $body = $streaming
+                ? $errorBody
+                : (
+                $prepared->sink !== null
+                    ? ''
+                    : (string)$nativeResponse->getBody()
+                );
+
+            if ($status < 200 || $status >= 300) {
+                $terminal = true;
+                $clearCommon();
+
+                /*
+                 * HTTP 消息已完整接收，连接本身仍可正常归还。
+                 */
+                $request->release(
+                    $this->pool,
+                    $pooled,
+                    true
+                );
+
+                $handle->markFailed();
+
+                try {
+                    $onError(ExceptionFactory::http(
+                        $prepared->method,
+                        $prepared->url,
+                        $status,
+                        $headers,
+                        $body
+                    ));
+                } catch (\Throwable) {
+                }
+
+                return;
+            }
+
+            $terminal = true;
+            $clearCommon();
+
+            $request->release(
+                $this->pool,
+                $pooled,
+                true
+            );
+
+            try {
+                if ($streaming) {
+                    $onComplete(new StreamResult(
+                        status: $status,
+                        headers: $headers,
+                        url: $prepared->url,
+                        termination:
+                        StreamTermination::MESSAGE_COMPLETE,
+                        bytesReceived: $request->receivedBytes(),
+                        durationMs: self::elapsed($startedAt)
+                    ));
+                } else {
+                    $onComplete(new Response(
+                        status: $status,
+                        headers: $headers,
+                        body: $body,
+                        url: $prepared->url,
+                        durationMs: self::elapsed($startedAt),
+                        protocolVersion:
+                        $nativeResponse->getProtocolVersion()
+                    ));
+                }
+
+                $handle->markCompleted();
+            } catch (\Throwable $callbackError) {
+                $handle->markFailed();
+
+                try {
+                    $onError(new StreamCallbackException(
+                        'completion callback failed: '
+                        . $callbackError->getMessage(),
+                        previous: $callbackError
+                    ));
+                } catch (\Throwable) {
+                }
+            }
+        };
+
+        $markConnected = function () use (
+            &$connectTimer,
+            $touchIdle
+        ): void {
+            if ($connectTimer !== null) {
+                Timer::del($connectTimer);
+                $connectTimer = null;
+            }
+
+            $touchIdle();
+        };
+
+        $request->onConnected($markConnected);
+
+        $request->on(
+            'response',
+            function (ResponseInterface $nativeResponse) use (
+                &$head,
+                $prepared,
+                $streaming,
+                $onOpen,
+                $touchIdle,
+                $markConnected
+            ): void {
+                $markConnected();
+
+                $head = new ResponseHead(
+                    status: $nativeResponse->getStatusCode(),
+                    headers: Header::normalize(
+                        $nativeResponse->getHeaders()
+                    ),
+                    url: $prepared->url,
+                    protocolVersion:
+                    $nativeResponse->getProtocolVersion()
+                );
+
+                $touchIdle();
+
+                if (
+                    $streaming
+                    && $head->status >= 200
+                    && $head->status < 300
+                ) {
+                    $onOpen($head);
+                }
+            }
+        );
+
+        $request->on(
+            'progress',
+            function (string $chunk) use (
+                &$head,
+                &$errorBody,
+                &$sink,
+                $streaming,
+                $onChunk,
+                $touchIdle,
+                $finishEarly
+            ): void {
+                $touchIdle();
+
+                if ($chunk === '') {
                     return;
                 }
 
-                if ($doneToken !== null && $line === $doneToken) {
-                    if (!$doneEmitted) {
-                        $doneEmitted = true;
-                        $onChunk('', true);
+                if (
+                    $head instanceof ResponseHead
+                    && ($head->status < 200 || $head->status >= 300)
+                ) {
+                    if (strlen($errorBody) < 65_536) {
+                        $errorBody .= substr(
+                            $chunk,
+                            0,
+                            65_536 - strlen($errorBody)
+                        );
                     }
-                    $conn->close();
+
                     return;
                 }
 
-                $onChunk($line, false);
-                return;
-            }
+                if (is_resource($sink)) {
+                    $remaining = $chunk;
 
-            if ($line === '' || !str_starts_with($line, 'data:')) {
-                return;
-            }
+                    while ($remaining !== '') {
+                        $written = fwrite($sink, $remaining);
 
-            $payload = trim(substr($line, 5));
+                        if ($written === false || $written === 0) {
+                            throw new \RuntimeException(
+                                'failed to write response sink'
+                            );
+                        }
 
-            if ($doneToken !== null && $payload === $doneToken) {
-                if (!$doneEmitted) {
-                    $doneEmitted = true;
-                    $onChunk('', true);
+                        $remaining = substr($remaining, $written);
+                    }
                 }
-                $conn->close();
-                return;
-            }
 
-            if ($payload === '') {
-                return;
-            }
-
-            $onChunk($payload, false);
-        };
-
-        $conn->onConnect = static function ($connection) use ($request, $touch): void {
-            $connection->send($request);
-            $touch();
-        };
-
-        $conn->onMessage = function ($connection, string $chunk) use (
-            &$buffer,
-            &$headerDone,
-            &$rawHeader,
-            &$responseHeaders,
-            &$statusCode,
-            &$fallbackMode,
-            $touch,
-            $emitLine,
-            $fallbackToGuzzle,
-            $log
-        ): void {
-            if ($fallbackMode) {
-                return;
-            }
-
-            $touch();
-            $buffer .= $chunk;
-
-            if (!$headerDone) {
-                $pos = strpos($buffer, "\r\n\r\n");
-                if ($pos === false) {
+                if (!$streaming) {
                     return;
                 }
 
-                $rawHeader = substr($buffer, 0, $pos);
-                $buffer = substr($buffer, $pos + 4);
-                $headerDone = true;
-
-                [$statusCode, $responseHeaders] = $this->parseResponseHeader($rawHeader);
-
-                if ($statusCode < 200 || $statusCode >= 300) {
-                    $fallbackToGuzzle('non-2xx-stream-response');
-                    return;
+                try {
+                    $continue = $onChunk($chunk);
+                } catch (\Throwable $error) {
+                    throw new StreamCallbackException(
+                        'stream callback failed: '
+                        . $error->getMessage(),
+                        previous: $error
+                    );
                 }
 
-                if ($this->shouldFallbackByHeaders($responseHeaders)) {
-                    $fallbackToGuzzle('complex-stream-headers');
-                    return;
+                if ($continue === false) {
+                    $finishEarly(
+                        StreamTermination::CALLBACK_STOP
+                    );
                 }
+            }
+        );
 
-                $contentType = strtolower($responseHeaders['content-type'][0] ?? '');
-                if ($contentType !== '' && !$this->isSafeTextStreamContentType($contentType)) {
-                    $fallbackToGuzzle('unsupported-content-type');
-                    return;
+        $request->once(
+            'success',
+            static function (
+                ResponseInterface $response
+            ) use ($finishSuccess): void {
+                $finishSuccess($response);
+            }
+        );
+
+        $request->once(
+            'error',
+            static function (\Throwable $error) use (
+                $finishError
+            ): void {
+                $finishError($error);
+            }
+        );
+
+        $handle->setCanceller(
+            static function (?string $reason) use (
+                $finishError
+            ): void {
+                $finishError(new CancelledException(
+                    $reason ?: 'request cancelled'
+                ));
+            }
+        );
+
+        if ($prepared->cancellation !== null) {
+            $cancellationRegistration =
+                $prepared->cancellation->subscribe(
+                    static function (?string $reason) use (
+                        $finishError
+                    ): void {
+                        $finishError(new CancelledException(
+                            $reason ?: 'request cancelled'
+                        ));
+                    }
+                );
+        }
+
+        if ($terminal) {
+            return $handle;
+        }
+
+        $connectTimer = Timer::delay(
+            $prepared->timeouts->connect,
+            static function () use ($finishError): void {
+                $finishError(new ConnectTimeoutException(
+                    'connection timeout',
+                    retryable: true
+                ));
+            }
+        );
+
+        if ($prepared->timeouts->request > 0) {
+            $requestTimer = Timer::delay(
+                $prepared->timeouts->request,
+                static function () use ($finishError): void {
+                    $finishError(new RequestTimeoutException(
+                        'request timeout',
+                        retryable: true
+                    ));
                 }
-
-                $log('debug', '[stream] workerman stream accepted', [
-                    'status' => $statusCode,
-                    'headers' => $responseHeaders,
-                ]);
-            }
-
-            while (($pos = strpos($buffer, "\n")) !== false) {
-                $line = rtrim(substr($buffer, 0, $pos), "\r");
-                $buffer = substr($buffer, $pos + 1);
-                $emitLine($line);
-            }
-        };
-
-        $conn->onClose = function () use (&$fallbackMode, $end): void {
-            if ($fallbackMode) {
-                return;
-            }
-            $end(true);
-        };
-
-        $conn->onError = function ($connection, $code = 0, $msg = '') use (&$fallbackMode, $fallbackToGuzzle, $log, $end): void {
-            if ($fallbackMode) {
-                return;
-            }
-
-            $log('warning', '[stream] workerman connection error', [
-                'code' => $code,
-                'message' => $msg,
-            ]);
-
-            // 连接阶段/协议阶段异常，优先回退
-            $fallbackToGuzzle('connection-error');
-
-            // 若 fallback 未接管，则至少结束回调
-            $end(true);
-        };
+            );
+        }
 
         try {
-            $conn->connect();
-        } catch (\Throwable $e) {
-            unset(self::$pool[$connId]);
-            throw new StreamException('stream connect failed: ' . $e->getMessage(), 0, $e);
-        }
-    }
+            $parts = parse_url($prepared->url);
 
-    private function absoluteUrl(string $uri): string
-    {
-        if (preg_match('#^https?://#i', $uri)) {
-            return $uri;
+            if ($parts === false || empty($parts['host'])) {
+                throw new ConfigurationException(
+                    'invalid asynchronous HTTP URL'
+                );
+            }
+
+            $host = (string)$parts['host'];
+            $secure = strtolower((string)$parts['scheme']) === 'https';
+            $port = (int)($parts['port'] ?? ($secure ? 443 : 80));
+
+            $context = [
+                'ssl' => [
+                    'verify_peer' => $this->verify,
+                    'verify_peer_name' => $this->verify,
+                    'allow_self_signed' => !$this->verify,
+                    'peer_name' => $host,
+                    'SNI_enabled' => true,
+                    'disable_compression' => true,
+                ],
+            ];
+
+            $request->setOptions([
+                'method' => $prepared->method,
+                'headers' => $prepared->headers,
+                'context' => $context,
+                'proxy' => $prepared->proxy ?? '',
+                'allow_redirects' => ['max' => 0],
+            ]);
+
+            if ($prepared->multipart !== null) {
+                $request->write([
+                    'multipart' => $prepared->multipart,
+                ]);
+            } elseif ($prepared->body !== '') {
+                $request->write($prepared->body);
+            }
+
+            $addressHost = str_contains($host, ':')
+                ? '[' . trim($host, '[]') . ']'
+                : $host;
+
+            $connection = $this->pool->fetch(
+                "tcp://{$addressHost}:{$port}",
+                $secure,
+                $prepared->proxy ?? ''
+            );
+
+            if ($connection !== null) {
+                $pooled = true;
+                $request->attachConnection($connection);
+
+                if ($connection->getStatus(false) === 'ESTABLISHED') {
+                    $markConnected();
+                }
+            }
+
+            /*
+             * 如果连接池达到上限，Request 会建立独占连接。
+             * 这避免事件循环被同步等待；该独占连接完成后不会复用。
+             */
+            $request->end();
+        } catch (\Throwable $error) {
+            $finishError($error);
         }
 
-        return $this->baseUri . ltrim($uri, '/');
+        return $handle;
     }
 
     /**
-     * @return array{0:int,1:array<string,array<int,string>>}
+     * @return array{0:resource|null,1:bool}
      */
-    private function parseResponseHeader(string $rawHeader): array
+    private function openSink(mixed $sink): array
     {
-        $lines = explode("\r\n", $rawHeader);
-        $statusLine = array_shift($lines) ?? '';
-
-        if (!preg_match('#^HTTP/\d+\.\d+\s+(\d{3})#', $statusLine, $m)) {
-            throw new StreamException('invalid stream response status line');
+        if ($sink === null) {
+            return [null, false];
         }
 
-        $status = (int)$m[1];
-        $headers = [];
-
-        foreach ($lines as $line) {
-            $pos = strpos($line, ':');
-            if ($pos === false) {
-                continue;
-            }
-
-            $name = strtolower(trim(substr($line, 0, $pos)));
-            $value = trim(substr($line, $pos + 1));
-
-            if ($name === '') {
-                continue;
-            }
-
-            $headers[$name][] = $value;
+        if (is_resource($sink)) {
+            return [$sink, false];
         }
 
-        return [$status, $headers];
+        if (!is_string($sink) || $sink === '') {
+            throw new ConfigurationException(
+                'sink must be a writable resource or file path'
+            );
+        }
+
+        $resource = @fopen($sink, 'wb');
+
+        if ($resource === false) {
+            throw new ConfigurationException(
+                "unable to open response sink: {$sink}"
+            );
+        }
+
+        return [$resource, true];
     }
 
-    /**
-     * 发现复杂编码时，直接回退到 Guzzle
-     *
-     * @param array<string,array<int,string>> $headers
-     */
-    private function shouldFallbackByHeaders(array $headers): bool
-    {
-        $transferEncoding = strtolower(implode(',', $headers['transfer-encoding'] ?? []));
-        if ($transferEncoding !== '' && str_contains($transferEncoding, 'chunked')) {
-            return true;
+    private function mapNetworkError(
+        \Throwable $error,
+        PreparedRequest $prepared
+    ): \Throwable {
+        $message = $error->getMessage();
+
+        if (preg_match(
+            '/closed|unexpected eof|connection reset|broken pipe/i',
+            $message
+        )) {
+            return new UnexpectedEofException(
+                message: 'HTTP response ended unexpectedly: ' . $message,
+                previous: $error,
+                method: $prepared->method,
+                url: $prepared->url,
+                retryable: true
+            );
         }
 
-        $contentEncoding = strtolower(implode(',', $headers['content-encoding'] ?? []));
-        foreach (['gzip', 'deflate', 'br'] as $encoding) {
-            if ($contentEncoding !== '' && str_contains($contentEncoding, $encoding)) {
-                return true;
-            }
+        if (preg_match(
+            '/ssl|tls|certificate|handshake/i',
+            $message
+        )) {
+            return new TlsException(
+                message: 'TLS request failed: ' . $message,
+                previous: $error,
+                method: $prepared->method,
+                url: $prepared->url
+            );
         }
 
-        return false;
+        if (preg_match('/connect.*timeout/i', $message)) {
+            return new ConnectTimeoutException(
+                message: 'connection timeout: ' . $message,
+                previous: $error,
+                method: $prepared->method,
+                url: $prepared->url,
+                retryable: true
+            );
+        }
+
+        if (preg_match('/timeout/i', $message)) {
+            return new RequestTimeoutException(
+                message: 'request timeout: ' . $message,
+                previous: $error,
+                method: $prepared->method,
+                url: $prepared->url,
+                retryable: true
+            );
+        }
+
+        return new ConnectionException(
+            message: 'request connection failed: ' . $message,
+            previous: $error,
+            method: $prepared->method,
+            url: $prepared->url,
+            retryable: true
+        );
     }
 
-    private function isSafeTextStreamContentType(string $contentType): bool
+    private static function elapsed(int $startedAt): float
     {
-        foreach ([
-                     'text/event-stream',
-                     'application/json',
-                     'application/x-ndjson',
-                     'text/plain',
-                 ] as $allowed) {
-            if (str_contains($contentType, $allowed)) {
-                return true;
-            }
-        }
-
-        return false;
+        return (hrtime(true) - $startedAt) / 1_000_000;
     }
 }

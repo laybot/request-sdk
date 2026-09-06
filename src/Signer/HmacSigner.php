@@ -8,22 +8,36 @@ use LayBot\Request\Contract\SignerInterface;
 final class HmacSigner implements SignerInterface
 {
     public function __construct(
-        private string $appKey,
-        private string $secret
+        private readonly string $apiKey,
+        private readonly string $secret,
     ) {
     }
 
-    public function sign(string $method, string $path, string $body = ''): array
-    {
-        $ts = (string)round(microtime(true) * 1000);
-        $md5 = $body !== '' ? md5($body, false) : '';
-        $plain = "{$this->appKey}\n{$ts}\n{$path}\n{$md5}";
-        $sig = hash_hmac('sha256', $plain, $this->secret);
+    public function sign(
+        string $method,
+        string $path,
+        string $body = ''
+    ): array {
+        $timestamp = (string)time();
+        $nonce = bin2hex(random_bytes(16));
+
+        $canonical = implode("\n", [
+            strtoupper($method),
+            $path,
+            hash('sha256', $body),
+            $timestamp,
+            $nonce,
+        ]);
 
         return [
-            'X-App-Id' => $this->appKey,
-            'X-Timestamp' => $ts,
-            'X-Sign' => $sig,
+            'X-Api-Key' => $this->apiKey,
+            'X-Timestamp' => $timestamp,
+            'X-Nonce' => $nonce,
+            'X-Signature' => hash_hmac(
+                'sha256',
+                $canonical,
+                $this->secret
+            ),
         ];
     }
 }

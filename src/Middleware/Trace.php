@@ -3,133 +3,33 @@ declare(strict_types=1);
 
 namespace LayBot\Request\Middleware;
 
-use GuzzleHttp\Promise\PromiseInterface;
-use Psr\Http\Message\RequestInterface;
-use Psr\Http\Message\ResponseInterface;
-use Psr\Log\LoggerInterface;
-
 final class Trace
 {
-    public static function middleware(LoggerInterface $logger): callable
-    {
-        return static function (callable $handler) use ($logger): callable {
-            return static function (RequestInterface $request, array $options) use ($handler, $logger): PromiseInterface {
-                $logger->debug('[HTTP] send', [
-                    'method' => $request->getMethod(),
-                    'uri' => (string)$request->getUri(),
-                    'headers' => self::maskHeaders($request->getHeaders()),
-                    'body' => self::formatBodyForLog(
-                        (string)$request->getBody(),
-                        $request->getHeaderLine('Content-Type')
-                    ),
-                ]);
-
-                return $handler($request, $options)->then(
-                    static function ($response) use ($logger) {
-                        if ($response instanceof ResponseInterface) {
-                            $logger->debug('[HTTP] recv', [
-                                'status' => $response->getStatusCode(),
-                                'headers' => self::maskHeaders($response->getHeaders()),
-                                'body' => self::formatBodyForLog(
-                                    (string)$response->getBody(),
-                                    $response->getHeaderLine('Content-Type')
-                                ),
-                            ]);
-                        } elseif (is_array($response)) {
-                            $logger->debug('[HTTP] recv', $response);
-                        }
-
-                        return $response;
-                    }
-                );
-            };
-        };
+    public static function headers(
+        ?string $requestId = null,
+        ?string $traceId = null
+    ): array {
+        return [
+            'X-Request-Id' => $requestId ?: self::id(),
+            'X-Trace-Id' => $traceId ?: self::id(),
+        ];
     }
 
-    private static function maskHeaders(array $headers): array
+    public static function id(): string
     {
-        $masked = [];
+        $bytes = random_bytes(16);
+        $bytes[6] = chr((ord($bytes[6]) & 0x0f) | 0x40);
+        $bytes[8] = chr((ord($bytes[8]) & 0x3f) | 0x80);
 
-        foreach ($headers as $key => $value) {
-            if (self::isSensitiveHeader((string)$key)) {
-                $masked[$key] = ['***'];
-                continue;
-            }
-            $masked[$key] = $value;
-        }
+        $hex = bin2hex($bytes);
 
-        return $masked;
-    }
-
-    private static function isSensitiveHeader(string $headerName): bool
-    {
-        $name = strtolower(trim($headerName));
-        if ($name === '') {
-            return false;
-        }
-
-        if (in_array($name, ['authorization', 'proxy-authorization'], true)) {
-            return true;
-        }
-
-        foreach (['token', 'secret', 'key', 'signature', 'sign'] as $kw) {
-            if (str_contains($name, $kw)) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private static function formatBodyForLog(string $body, string $contentType, int $max = 2000): string
-    {
-        if ($body === '') {
-            return '';
-        }
-
-        $contentType = strtolower(trim($contentType));
-
-        if ($contentType !== '' && !self::isTextLikeContentType($contentType)) {
-            return '[binary omitted]';
-        }
-
-        return self::limitBody($body, $max);
-    }
-
-    private static function isTextLikeContentType(string $contentType): bool
-    {
-        foreach ([
-                     'application/json',
-                     'application/xml',
-                     'application/x-www-form-urlencoded',
-                     'application/javascript',
-                     'application/x-ndjson',
-                     'text/',
-                     'xml',
-                     'json',
-                 ] as $needle) {
-            if (str_contains($contentType, $needle)) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private static function limitBody(string $body, int $max = 2000): string
-    {
-        if ($max <= 0) {
-            return '';
-        }
-
-        if (strlen($body) <= $max) {
-            return $body;
-        }
-
-        return substr($body, 0, $max) . '...<truncated>';
-    }
-
-    private function __construct()
-    {
+        return sprintf(
+            '%s-%s-%s-%s-%s',
+            substr($hex, 0, 8),
+            substr($hex, 8, 4),
+            substr($hex, 12, 4),
+            substr($hex, 16, 4),
+            substr($hex, 20)
+        );
     }
 }

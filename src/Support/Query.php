@@ -6,84 +6,140 @@ namespace LayBot\Request\Support;
 final class Query
 {
     /**
-     * 规范化 query 参数
+     * 支持四种数组编码：
      *
-     * 当前支持：
-     * - brackets: a[]=1&a[]=2
-     * - repeat:   a=1&a=2
+     * indices:
+     *   ids[0]=1&ids[1]=2
      *
-     * 返回值：
-     * - brackets: 直接返回数组，交给 Guzzle 编码
-     * - repeat:   返回 query string
+     * brackets:
+     *   ids[]=1&ids[]=2
+     *
+     * repeat:
+     *   ids=1&ids=2
+     *
+     * comma:
+     *   ids=1,2
      */
-    public static function normalize(array $query, string $format = 'brackets'): array|string
-    {
-        $format = strtolower(trim($format));
+    public static function build(
+        array|string|null $query,
+        string $arrayFormat = 'brackets'
+    ): string {
+        if ($query === null || $query === '' || $query === []) {
+            return '';
+        }
 
-        return match ($format) {
-            'repeat' => self::buildRepeatQuery($query),
-            default => $query,
+        if (is_string($query)) {
+            return ltrim($query, '?');
+        }
+
+        if (!in_array(
+            $arrayFormat,
+            ['indices', 'brackets', 'repeat', 'comma'],
+            true
+        )) {
+            throw new \InvalidArgumentException(
+                "unsupported query array format: {$arrayFormat}"
+            );
+        }
+
+        $pairs = [];
+
+        foreach ($query as $key => $value) {
+            self::flatten(
+                (string)$key,
+                $value,
+                $arrayFormat,
+                $pairs
+            );
+        }
+
+        return implode('&', array_map(
+            static fn (array $pair): string =>
+                rawurlencode($pair[0]) . '=' . rawurlencode($pair[1]),
+            $pairs
+        ));
+    }
+
+    /**
+     * @param list<array{0:string,1:string}> $pairs
+     */
+    private static function flatten(
+        string $key,
+        mixed $value,
+        string $arrayFormat,
+        array &$pairs
+    ): void {
+        if (!is_array($value)) {
+            $pairs[] = [$key, self::scalar($value)];
+            return;
+        }
+
+        if ($value === []) {
+            return;
+        }
+
+        $isList = array_is_list($value);
+
+        if (
+            $isList
+            && $arrayFormat === 'comma'
+            && self::isScalarList($value)
+        ) {
+            $pairs[] = [
+                $key,
+                implode(',', array_map(self::scalar(...), $value)),
+            ];
+            return;
+        }
+
+        foreach ($value as $childKey => $childValue) {
+            $childName = match (true) {
+                !$isList => $key . '[' . $childKey . ']',
+                $arrayFormat === 'indices' =>
+                    $key . '[' . $childKey . ']',
+                $arrayFormat === 'brackets' =>
+                    $key . '[]',
+                $arrayFormat === 'repeat' =>
+                $key,
+                $arrayFormat === 'comma' =>
+                    $key . '[]',
+                default => $key,
+            };
+
+            self::flatten(
+                $childName,
+                $childValue,
+                $arrayFormat,
+                $pairs
+            );
+        }
+    }
+
+    private static function scalar(mixed $value): string
+    {
+        return match (true) {
+            $value === null => '',
+            $value === true => '1',
+            $value === false => '0',
+            is_scalar($value) => (string)$value,
+            $value instanceof \Stringable => (string)$value,
+            default => throw new \InvalidArgumentException(
+                'query value must be scalar, null, array or Stringable'
+            ),
         };
     }
 
-    private static function buildRepeatQuery(array $query): string
+    private static function isScalarList(array $values): bool
     {
-        $pairs = [];
-        self::appendPairs($pairs, $query);
-        return implode('&', $pairs);
-    }
-
-    private static function appendPairs(array &$pairs, array $data, ?string $prefix = null): void
-    {
-        foreach ($data as $key => $value) {
-            $key = (string)$key;
-            $name = $prefix === null ? $key : "{$prefix}[{$key}]";
-
-            if (is_array($value)) {
-                if (self::isList($value)) {
-                    foreach ($value as $item) {
-                        if (is_array($item)) {
-                            self::appendPairs($pairs, $item, $name);
-                        } else {
-                            $pairs[] = rawurlencode($name) . '=' . rawurlencode(self::scalarToString($item));
-                        }
-                    }
-                } else {
-                    self::appendPairs($pairs, $value, $name);
-                }
-                continue;
-            }
-
-            $pairs[] = rawurlencode($name) . '=' . rawurlencode(self::scalarToString($value));
-        }
-    }
-
-    private static function scalarToString(mixed $value): string
-    {
-        if ($value === null) {
-            return '';
-        }
-        if (is_bool($value)) {
-            return $value ? '1' : '0';
-        }
-        if (is_scalar($value)) {
-            return (string)$value;
-        }
-        return Json::encode($value);
-    }
-
-    private static function isList(array $arr): bool
-    {
-        if (function_exists('array_is_list')) {
-            return array_is_list($arr);
-        }
-
-        $i = 0;
-        foreach ($arr as $k => $_) {
-            if ($k !== $i++) {
+        foreach ($values as $value) {
+            if (
+                is_array($value)
+                || is_object($value) && !$value instanceof \Stringable
+            ) {
                 return false;
             }
         }
+
         return true;
     }
 
